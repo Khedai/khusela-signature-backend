@@ -79,12 +79,31 @@ npm test
   that an upload is recorded (while a file of the wrong type is refused as a 400 and
   an oversized one as a 413, rather than either looking like a fault on this side),
   and that **not one file reached the host's disk**.
+- `tools/test_restart.js` — starts the server, captures a signature, kills the process
+  the way a deploy does, then starts a second process against the same database and
+  checks the signature is still there byte-for-byte, that the used signing link is
+  still refused with a 410, and that the invitation is still readable. This is the
+  property a sleeping free instance depends on.
 - `tools/test_migration.js` — starts the server against a database written by the
   previous version and checks the new columns (`manage_token_hash`, `signer_label`,
   `application_ref`, `signature_data`, the `documents.content` table) are added
   without touching existing invitations.
 
-Both run on a scratch database in `storage/` and clean up after themselves.
+All three run on a scratch database in `storage/` and clean up after themselves.
+
+**Before deploying, run the same suites against the real database.** This is what
+turns "the settings look right" into evidence, because it uses the connection Render
+will use:
+
+```bash
+E2E_DB_URL=libsql://khusela-<you>.turso.io TURSO_AUTH_TOKEN=<token> node tools/test_signature_flow.js
+E2E_DB_URL=libsql://khusela-<you>.turso.io TURSO_AUTH_TOKEN=<token> node tools/test_restart.js
+```
+
+On Windows, set those two in PowerShell first: `$env:E2E_DB_URL='libsql://…'` and
+`$env:TURSO_AUTH_TOKEN='…'`. A local server that speaks the same protocol works too
+(`E2E_DB_URL=http://127.0.0.1:8080`, e.g. `sqld` from the Turso CLI), which is how
+the remote path was first exercised without an account.
 
 ## Where PUBLIC_BASE_URL comes from
 A signing link is built from one address: the public HTTPS one your host gives

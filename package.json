@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node tools/test_signature_flow.js && node tools/test_migration.js"
+    "test": "node tools/test_signature_flow.js && node tools/test_restart.js && node tools/test_migration.js"
   },
   "dependencies": {
     "@libsql/client": "^0.18.0",

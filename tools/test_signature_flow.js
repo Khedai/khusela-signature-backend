@@ -36,7 +36,9 @@ function check(name, ok, extra) {
 const child = spawn(process.execPath, ['server.js'], {
   cwd: ROOT,
   env: Object.assign({}, process.env, {
-    PORT: String(PORT), TURSO_DATABASE_URL: 'file:./storage/_e2e_test.db', PUBLIC_BASE_URL: BASE,
+    // E2E_DB_URL points this same suite at a real libSQL server (http://… or
+    // libsql://…), which is the path Render uses; unset it to use a scratch file.
+    PORT: String(PORT), TURSO_DATABASE_URL: process.env.E2E_DB_URL || 'file:./storage/_e2e_test.db', PUBLIC_BASE_URL: BASE,
     ALLOWED_ORIGINS: 'https://itc-extractor.vercel.app', ADMIN_API_KEY: 'test-key', REQUIRE_DOCUMENTS: 'false',
   }),
   stdio: ['ignore', 'pipe', 'pipe'],
