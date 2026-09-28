@@ -54,30 +54,53 @@ const SCHEMA=[
  created_at TEXT NOT NULL, ip TEXT, user_agent TEXT, meta TEXT
 )`,
 ];
-await ddl(SCHEMA);
-
 // Lightweight migrations: CREATE TABLE IF NOT EXISTS never adds a column to a
 // database that already exists, so additive columns are applied here.
 async function ensureColumn(table,column,definition){
  const cols=(await all(`PRAGMA table_info(${table})`)).map(c=>c.name);
  if(!cols.includes(column)) await run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
-await ensureColumn('invitations','manage_token_hash','TEXT');
-await ensureColumn('invitations','signer_label','TEXT');
-await ensureColumn('invitations','application_ref','TEXT');
-// The captured images used to live in files whose names were recorded in these
-// tables; the bytes themselves are stored in the database now.
-await ensureColumn('signatures','signature_data','BLOB');
-await ensureColumn('documents','content','BLOB');
-// The manage token is the consultant-side capability: it is only ever returned
-// to the app that created the request, never sent to the client.
-await run('CREATE UNIQUE INDEX IF NOT EXISTS idx_invitations_manage_token ON invitations(manage_token_hash)');
+
+// Creating the schema and applying those migrations is the first thing to touch
+// the database, so a wrong TURSO_DATABASE_URL or TURSO_AUTH_TOKEN fails here rather
+// than on the first client's request. A failure stops the process: a host with a
+// disposable disk must never look as if it stored something it did not, and a
+// server that cannot record a signature must not answer as though it had.
+async function prepareDatabase(){
+ await ddl(SCHEMA);
+ await ensureColumn('invitations','manage_token_hash','TEXT');
+ await ensureColumn('invitations','signer_label','TEXT');
+ await ensureColumn('invitations','application_ref','TEXT');
+ // The captured images used to live in files whose names were recorded in these
+ // tables; the bytes themselves are stored in the database now.
+ await ensureColumn('signatures','signature_data','BLOB');
+ await ensureColumn('documents','content','BLOB');
+ // The manage token is the consultant-side capability: it is only ever returned
+ // to the app that created the request, never sent to the client.
+ await run('CREATE UNIQUE INDEX IF NOT EXISTS idx_invitations_manage_token ON invitations(manage_token_hash)');
+}
+
+try{
+ await prepareDatabase();
+}catch(e){
+ console.error(`\nCould not prepare the database at ${DB_URL}`);
+ console.error(USING_REMOTE_DB
+  ?'Check TURSO_DATABASE_URL and TURSO_AUTH_TOKEN: the URL must be the libsql:// one for this database, and the token must be one created for it.'
+  :'Check that the STORAGE_DIR folder exists and is writable.');
+ console.error(e.name+': '+e.message);
+ process.exit(1);
+}
 
 const app=express();
 app.disable('x-powered-by');
 app.use(helmet({crossOriginResourcePolicy:{policy:'cross-origin'}}));
 const origins=(process.env.ALLOWED_ORIGINS||'*').split(',').map(x=>x.trim());
-app.use(cors({origin:(origin,cb)=>{if(!origin||origins.includes('*')||origins.includes(origin)) return cb(null,true); cb(new Error('CORS origin denied'));}}));
+app.use(cors({origin:(origin,cb)=>{
+ if(!origin||origins.includes('*')||origins.includes(origin)) return cb(null,true);
+ // A refused origin is an authorization failure, not a malformed request. The
+ // status is attached so the error handler below keeps it a 4xx.
+ const denied=new Error('CORS origin denied'); denied.status=403; cb(denied);
+}}));
 app.use(express.json({limit:'2mb'}));
 app.use(express.urlencoded({extended:false,limit:'2mb'}));
 app.use(express.static(path.join(__dirname,'public')));
@@ -193,7 +216,13 @@ app.get('/api/manage/:manageToken/signature',wrap(async(req,res)=>{
 const upload=multer({
  storage:multer.memoryStorage(),
  limits:{fileSize:Number(process.env.MAX_UPLOAD_MB||15)*1024*1024},
- fileFilter:(req,file,cb)=>{const ok=['application/pdf','image/jpeg','image/png'].includes(file.mimetype); cb(ok?null:new Error('Only PDF, JPG and PNG files are allowed'),ok);}
+ fileFilter:(req,file,cb)=>{
+  const ok=['application/pdf','image/jpeg','image/png'].includes(file.mimetype);
+  if(ok) return cb(null,true);
+  // A rejected type is the client's mistake, so it carries a status and the error
+  // handler below passes the message on instead of turning it into a 500.
+  const bad=new Error('Only PDF, JPG and PNG files are allowed'); bad.status=400; cb(bad);
+ }
 });
 
 app.post('/api/sign/:token/upload',upload.array('documents',6),wrap(async(req,res)=>{
@@ -252,5 +281,20 @@ app.get('/api/admin/invite/:id',requireAdmin,wrap(async(req,res)=>{
  res.json({ok:true,invitation:inv,documents:docs,signature:sig,audit:auditRows});
 }));
 
-app.use((err,req,res,next)=>{console.error(err); if(res.headersSent)return next(err); res.status(400).json({error:err.message||'Request failed'});});
+// Whatever a route did not answer itself is unexpected, and now that every route
+// reaches a database over the network the likeliest case is a database that cannot
+// be reached. An error that carries a status (a body that is not valid JSON, a
+// refused origin, a file of the wrong type) keeps that status and its message;
+// anything else is a fault on this side and becomes a 500 with a plain message,
+// because the real one can name the database and belongs in the log rather than in
+// a response to a client.
+app.use((err,req,res,next)=>{
+ console.error(err);
+ if(res.headersSent)return next(err);
+ // multer reports a refused upload with codes rather than a status. Those are the
+ // client's mistake too: an oversized file is a 413 and any other limit a 400.
+ const uploadStatus=err.name==='MulterError'?(err.code==='LIMIT_FILE_SIZE'?413:400):0;
+ const status=uploadStatus||err.status||err.statusCode||500;
+ res.status(status).json({error:status>=500?'The signature service could not complete that request':(err.message||'Request failed')});
+});
 app.listen(PORT,()=>console.log(`Khusela backend listening on ${BASE}`));

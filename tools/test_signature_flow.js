@@ -172,6 +172,30 @@ try {
     { headers: { 'x-admin-key': 'test-key' } })).json();
   check('Applicant 1 has no documents of their own', admin1.documents.length === 0, JSON.stringify(admin1.documents));
 
+  // A refused upload is the client's mistake and must be answered as one: a 4xx
+  // that names the rule, never the 500 the error handler keeps for faults on this
+  // side (a database it cannot reach). Both are refused before the database is
+  // touched.
+  const wrongType = new FormData();
+  wrongType.append('documents', new Blob([Buffer.from('not a document')], { type: 'text/plain' }), 'notes.txt');
+  const wrongTypeRes = await fetch(BASE + '/api/sign/' + token2 + '/upload', { method: 'POST', body: wrongType });
+  const wrongTypeBody = await wrongTypeRes.json();
+  check('a file of the wrong type is refused as a client error, not a 500',
+    wrongTypeRes.status === 400 && /Only PDF, JPG and PNG/.test(wrongTypeBody.error || ''),
+    wrongTypeRes.status + ' ' + JSON.stringify(wrongTypeBody));
+
+  const tooBig = new FormData();
+  tooBig.append('documents', new Blob([Buffer.alloc(16 * 1024 * 1024)], { type: 'application/pdf' }), 'huge.pdf');
+  const tooBigRes = await fetch(BASE + '/api/sign/' + token2 + '/upload', { method: 'POST', body: tooBig });
+  check('a file larger than MAX_UPLOAD_MB is refused with 413, not a 500',
+    tooBigRes.status === 413, String(tooBigRes.status));
+
+  const afterRefusals = await (await fetch(BASE + '/api/admin/invite/' + inv2.invitationId,
+    { headers: { 'x-admin-key': 'test-key' } })).json();
+  check('neither refused upload stored a document row',
+    afterRefusals.documents.length === 1, JSON.stringify(afterRefusals.documents));
+
+
   // 11. The whole point of moving off the filesystem: after a signature and an
   //     upload, not one file has been added to the host's disk.
   check('signing wrote no file to disk', countFiles(SIG_DIR) === sigFilesBefore,

@@ -76,7 +76,9 @@ npm test
 - `tools/test_signature_flow.js` — end-to-end: create a request, load the signing
   page data, poll the status, sign **without** documents, fetch the signature image
   (byte-for-byte), confirm the link is burned, that two applicants stay independent,
-  that an upload is recorded, and that **not one file reached the host's disk**.
+  that an upload is recorded (while a file of the wrong type is refused as a 400 and
+  an oversized one as a 413, rather than either looking like a fault on this side),
+  and that **not one file reached the host's disk**.
 - `tools/test_migration.js` — starts the server against a database written by the
   previous version and checks the new columns (`manage_token_hash`, `signer_label`,
   `application_ref`, `signature_data`, the `documents.content` table) are added
@@ -156,6 +158,24 @@ disk: there is nothing to put on one.
 it with a tunnel (`cloudflared tunnel --url http://localhost:3000` or `ngrok http
 3000`). Set `PUBLIC_BASE_URL` to the tunnel's `https://…` address and add the
 tunnel origin to `ALLOWED_ORIGINS` for the duration of the test.
+
+**If the first deploy fails**, the log says why before the service ever listens. A
+`TURSO_DATABASE_URL` for the wrong database, or a token that was revoked or belongs
+to another database, stops the process with:
+
+```
+Could not prepare the database at libsql://…
+Check TURSO_DATABASE_URL and TURSO_AUTH_TOKEN: the URL must be the libsql:// one
+for this database, and the token must be one created for it.
+LibsqlError: SERVER_ERROR: Server returned HTTP status 404
+```
+
+That is deliberate. A server that cannot reach its database must not answer requests
+as though it had recorded a signature, and it must never quietly fall back to a local
+file instead: on a host that wipes its disk, anything written there would be lost
+without an error ever being shown. So the process exits, Render marks the deploy
+failed, and the log names the setting to check.
+
 
 ## Production requirements
 1. Use HTTPS.
