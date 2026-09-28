@@ -129,6 +129,14 @@ function requireAdmin(req,res,next){
 
 app.get('/health',(req,res)=>res.json({ok:true,service:'khusela-digital-signature',time:now()}));
 
+// The client's link points at /sign/<token>, but the page behind it is one static
+// file for every token: public/sign.html reads the token out of its own path.
+// Without this route nothing matches that path and the client is shown Express's
+// "Cannot GET /sign/…" instead of a form, which is the whole point of the link.
+// The token is deliberately not checked here — an unknown, expired or already-used
+// link is reported by the page itself out of the API call below.
+app.get('/sign/:token',(req,res)=>res.sendFile(path.join(__dirname,'public','sign.html')));
+
 // Matches the existing Khusela HTML's Generate Signing Link call.
 app.post('/api/invite',wrap(async(req,res)=>{
  try{

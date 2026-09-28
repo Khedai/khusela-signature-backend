@@ -69,7 +69,13 @@ try {
 
   const token = inv.signingLink.split('/').pop();
 
-  // 2. The client's signing page loads it.
+  // 2. The client's signing page loads it — starting with the page itself, since
+  //    that is all the client receives. A 404 here would leave them looking at
+  //    "Cannot GET /sign/…" with no way to sign, which is why the route exists.
+  const pageRes = await fetch(inv.signingLink);
+  const pageHtml = await pageRes.text();
+  check('the signing link serves the signing page', pageRes.status === 200 && pageHtml.includes('Khusela Secure Digital Signature'), 'HTTP ' + pageRes.status);
+
   const sign = await (await fetch(BASE + '/api/sign/' + token)).json();
   check('signerLabel echoed to the signing page', sign.signerLabel === 'Applicant 1', JSON.stringify(sign));
   check('documents not required for a signature-only request', sign.requireDocuments === false);
