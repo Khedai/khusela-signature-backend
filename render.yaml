@@ -10,12 +10,19 @@
 # that it wipes on every deploy and restart, but there is nothing on it to lose.
 # The data itself is safe at Turso, which has its own free tier (5 GB, no card).
 #
-# Before the first deploy, create that database and copy its two values:
-#   1. Install the CLI:  npm i -g @tursodatabase/cli
-#   2. turso auth signup
-#   3. turso db create khusela
-#   4. turso db show khusela --url       -> libsql://khusela-<you>.turso.io
-#   5. turso db tokens create khusela    -> the auth token
+# Before the first deploy, create that database and copy its two values. There is
+# NO npm package for this CLI: `npm i -g @tursodatabase/cli` fails with a 404. The
+# Turso CLI runs on Linux and macOS only, so on Windows install it inside WSL:
+#   Windows  : run `wsl`, then the Linux line below
+#   macOS    : brew install tursodatabase/tap/turso
+#   Linux/WSL: curl -sSfL https://get.tur.so/install.sh | bash
+#   1. turso auth login --headless   (--headless prints a URL to open: WSL has no
+#      browser, and the same flag is what CI/CD environments need)
+#   2. turso db create khusela
+#   3. turso db show khusela --url       -> libsql://khusela-<you>.turso.io
+#   4. turso db tokens create khusela    -> the auth token
+# Installing nothing at all also works: the Turso dashboard creates the database
+# and a token for it by clicking.
 # Enter both in the service's Environment tab (Render prompts for the two
 # "sync: false" variables below rather than storing them in this repository).
 services:

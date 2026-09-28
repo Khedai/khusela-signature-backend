@@ -119,10 +119,20 @@ SQLite, 5 GB free) and the server runs on **Render** (free web instance).
 `render.yaml` in this folder describes the whole service, so the Dashboard only has
 to be pointed at the repository.
 
-1. **Create the database.** Install the Turso CLI
-   (`npm i -g @tursodatabase/cli`), then run `turso auth signup` and
-   `turso db create khusela`. The two values it can print are the only secrets the
-   server needs:
+1. **Create the database.** Install the Turso CLI. There is **no npm package** for
+   it — `npm i -g @tursodatabase/cli` returns a 404 — and it runs on Linux and
+   macOS only, so on Windows it belongs inside WSL:
+
+   ```bash
+   brew install tursodatabase/tap/turso      # macOS
+   curl -sSfL https://get.tur.so/install.sh | bash   # Linux, and inside `wsl` on Windows
+   ```
+
+   On WSL or in CI, add `--headless` so it prints a URL to open instead of
+   expecting a browser in Linux: `turso auth login --headless`. Then run
+   `turso db create khusela`. The Turso dashboard is an alternative that needs no
+   install at all: it creates the database and a token for it by clicking. The two
+   values are the only secrets the server needs:
    ```bash
    turso db show khusela --url      # libsql://khusela-<you>.turso.io
    turso db tokens create khusela   # the auth token
