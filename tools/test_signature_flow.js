@@ -13,8 +13,19 @@ const PORT = 3901;
 const BASE = `http://127.0.0.1:${PORT}`;
 const DB = path.join(ROOT, 'storage', '_e2e_test.db');
 const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
+const PNG_BYTES = Buffer.from(PNG.split(',')[1], 'base64');
+const PDF = Buffer.from('%PDF-1.4 test document');
 
 for (const f of [DB, DB + '-wal', DB + '-shm']) { try { fs.rmSync(f, { force: true }); } catch (e) {} }
+
+// The server keeps signatures and documents in the database now, so nothing it
+// does may add a file to the host's disk. Count what is already lying around
+// (older runs left files here) and compare again once the flow has finished.
+const SIG_DIR = path.join(ROOT, 'storage', 'signatures');
+const UPLOAD_DIR = path.join(ROOT, 'storage', 'uploads');
+const countFiles = (dir) => { try { return fs.readdirSync(dir).length; } catch (e) { return 0; } };
+const sigFilesBefore = countFiles(SIG_DIR);
+const upFilesBefore = countFiles(UPLOAD_DIR);
 
 let pass = 0, fail = 0;
 function check(name, ok, extra) {
@@ -25,7 +36,7 @@ function check(name, ok, extra) {
 const child = spawn(process.execPath, ['server.js'], {
   cwd: ROOT,
   env: Object.assign({}, process.env, {
-    PORT: String(PORT), DB_PATH: './storage/_e2e_test.db', PUBLIC_BASE_URL: BASE,
+    PORT: String(PORT), TURSO_DATABASE_URL: 'file:./storage/_e2e_test.db', PUBLIC_BASE_URL: BASE,
     ALLOWED_ORIGINS: 'https://itc-extractor.vercel.app', ADMIN_API_KEY: 'test-key', REQUIRE_DOCUMENTS: 'false',
   }),
   stdio: ['ignore', 'pipe', 'pipe'],
@@ -85,6 +96,9 @@ try {
   check('signature image served as a real PNG',
     imgRes.status === 200 && String(imgRes.headers.get('content-type')).includes('image/png') && buf.subarray(1, 4).toString() === 'PNG',
     imgRes.headers.get('content-type'));
+  // The bytes must come back out of the database exactly as they went in.
+  check('signature bytes round-trip exactly', buf.equals(PNG_BYTES),
+    'got ' + buf.length + ' bytes, expected ' + PNG_BYTES.length);
 
   // 6. The client's one-time link is burned.
   check('signed link can no longer be used', (await fetch(BASE + '/api/sign/' + token)).status === 410);
@@ -135,6 +149,35 @@ try {
   const man2 = await (await fetch(BASE + '/api/manage/' + inv2.manageToken)).json();
   check('Applicant 2 still pending while Applicant 1 is signed',
     man2.status === 'pending' && man2.signerLabel === 'Applicant 2', JSON.stringify(man2));
+
+  // 10. Uploaded documents go into the database too — the other half of "no disk".
+  //     Uploaded against Applicant 2 so the signature-only flow above is exercised
+  //     exactly as the PWA uses it.
+  const token2 = inv2.signingLink.split('/').pop();
+  const form = new FormData();
+  form.append('kind', 'id');
+  form.append('documents', new Blob([PDF], { type: 'application/pdf' }), 'id-copy.pdf');
+  const upRes = await fetch(BASE + '/api/sign/' + token2 + '/upload', { method: 'POST', body: form });
+  const up = await upRes.json();
+  check('uploading a document succeeds', upRes.status === 200 && up.count === 1, JSON.stringify(up));
+
+  const admin2 = await (await fetch(BASE + '/api/admin/invite/' + inv2.invitationId,
+    { headers: { 'x-admin-key': 'test-key' } })).json();
+  check('uploaded document is recorded with its name, type and size',
+    admin2.documents.length === 1 && admin2.documents[0].original_name === 'id-copy.pdf'
+      && admin2.documents[0].mime_type === 'application/pdf' && admin2.documents[0].size === PDF.length,
+    JSON.stringify(admin2.documents));
+
+  const admin1 = await (await fetch(BASE + '/api/admin/invite/' + inv.invitationId,
+    { headers: { 'x-admin-key': 'test-key' } })).json();
+  check('Applicant 1 has no documents of their own', admin1.documents.length === 0, JSON.stringify(admin1.documents));
+
+  // 11. The whole point of moving off the filesystem: after a signature and an
+  //     upload, not one file has been added to the host's disk.
+  check('signing wrote no file to disk', countFiles(SIG_DIR) === sigFilesBefore,
+    SIG_DIR + ' holds ' + countFiles(SIG_DIR) + ' files, was ' + sigFilesBefore);
+  check('uploading wrote no file to disk', countFiles(UPLOAD_DIR) === upFilesBefore,
+    UPLOAD_DIR + ' holds ' + countFiles(UPLOAD_DIR) + ' files, was ' + upFilesBefore);
 } catch (e) {
   fail++;
   console.log('  FAIL exception -- ' + (e && e.message));

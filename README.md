@@ -10,7 +10,13 @@ Production-oriented Node.js/Express backend for the Khusela application.
 - `GET /api/manage/:manageToken` — the consultant-side status of a signing request (`pending` / `signed` / `expired`), plus the signature URL when signed.
 - `GET /api/manage/:manageToken/signature` — the captured signature as a PNG.
 - Admin endpoints protected by `x-admin-key` for invitation/document/signature/audit status.
-- SQLite with WAL mode for a simple persistent deployment.
+- SQLite through the libSQL/Turso client, with **everything** in the database: the
+  invitations, the audit log, the uploaded documents and the signature images
+  themselves, the last two as BLOB columns. Nothing is written to the host's disk,
+  so an ephemeral filesystem (Render's free instance) cannot lose a signature.
+- One environment variable chooses where that database lives: `TURSO_DATABASE_URL`
+  unset keeps a local file at `storage/khusela.db` (tests and local development
+  need no account), set points the server at a free hosted Turso database.
 
 ## Two tokens per signing request
 `POST /api/invite` returns two different capabilities on purpose:
@@ -68,11 +74,13 @@ signature appears in that applicant's box and in the PDF the PWA e-mails.
 npm test
 ```
 - `tools/test_signature_flow.js` — end-to-end: create a request, load the signing
-  page data, poll the status, sign **without** documents, fetch the signature
-  image, confirm the link is burned and that two applicants stay independent.
+  page data, poll the status, sign **without** documents, fetch the signature image
+  (byte-for-byte), confirm the link is burned, that two applicants stay independent,
+  that an upload is recorded, and that **not one file reached the host's disk**.
 - `tools/test_migration.js` — starts the server against a database written by the
-  previous version and checks the new columns are added without touching
-  existing invitations.
+  previous version and checks the new columns (`manage_token_hash`, `signer_label`,
+  `application_ref`, `signature_data`, the `documents.content` table) are added
+  without touching existing invitations.
 
 Both run on a scratch database in `storage/` and clean up after themselves.
 
@@ -94,44 +102,55 @@ Two things follow from that:
    `PUBLIC_BASE_URL/sign/<token>` on their own phone. `http://localhost:3000`
    only works when the person signing is at this machine, so the server prints a
    startup warning if the address it resolved points at localhost.
-2. **The host must give you a real one.** Pick a host with a persistent public URL
-   and a writable disk — the signatures, uploads and `khusela.db` are all files
-   on disk. Render / Railway / Fly.io / a small VPS all work. Serverless
-   platforms (Vercel, Netlify functions) do **not**: their filesystem is
-   read-only and ephemeral, so signatures would vanish on the next deploy. The PWA
-   itself is fine on Vercel — it is only this backend that needs a disk.
+2. **The database must be reachable from it.** Nothing is stored on the host any
+   more, so any host will do — Render / Railway / Fly.io / a small VPS, and the free
+   instance of each, because an ephemeral filesystem can no longer take a signature
+   with it. Point `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` at your Turso
+   database and the server keeps every byte there. The one platform to avoid for
+   uploads is serverless functions (Vercel, Netlify): their request-body limit is a
+   few megabytes, so a large bank statement is refused before this code runs. The
+   PWA itself is fine on Vercel.
 
-## Deploying to Render
-`render.yaml` in this folder describes the whole service, so the Dashboard only
-has to be pointed at the repository.
+## Deploying: a free Turso database + a free Render instance
+Two free sign-ups, no card, no disk to buy. The database lives at **Turso** (hosted
+SQLite, 5 GB free) and the server runs on **Render** (free web instance).
+`render.yaml` in this folder describes the whole service, so the Dashboard only has
+to be pointed at the repository.
 
-1. Push this folder to a GitHub repository — Render deploys from Git, and this
+1. **Create the database.** Install the Turso CLI
+   (`npm i -g @tursodatabase/cli`), then run `turso auth signup` and
+   `turso db create khusela`. The two values it can print are the only secrets the
+   server needs:
+   ```bash
+   turso db show khusela --url      # libsql://khusela-<you>.turso.io
+   turso db tokens create khusela   # the auth token
+   ```
+2. Push this folder to a GitHub repository — Render deploys from Git, and this
    folder is not a repository until you create one.
-2. In Render choose **New → Blueprint** and pick that repository. Render then
-   creates the service, mounts a 1 GB disk at `/var/data`, sets
-   `STORAGE_DIR=/var/data`, allows the PWA's origin and generates `ADMIN_API_KEY`.
-3. When the deploy finishes, open the service URL — `/health` should answer
+3. In Render choose **New → Blueprint** and pick that repository. Render prompts for
+   `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` (marked `sync: false`, so they never
+   enter the repository), allows the PWA's origin and generates `ADMIN_API_KEY`.
+4. When the deploy finishes, open the service URL — `/health` should answer
    `{"ok":true,...}`.
-4. Copy that URL into `khusela-itc-pwa/js/config.js` as `signatureApiBase`
+5. Copy that URL into `khusela-itc-pwa/js/config.js` as `signatureApiBase`
    (see the PWA section above), commit it, and let Vercel redeploy.
 
-**The disk is not optional.** A Render service without one has an ephemeral
-filesystem that Render wipes on every deploy and restart. That deletes
-`khusela.db` — and with it every pending signing link. Disks are only available on
-a paid instance, which is why `render.yaml` asks for the `starter` plan; the free
-instance cannot safely hold this data. A disk has two further consequences worth
-knowing: deploys stop the old instance before starting the new one (a few seconds
-of downtime), and the service runs as a single instance.
+**Why no disk is needed.** Every byte that matters — the invitations, the uploaded
+documents and the signature images — is a row in the Turso database, so Render's
+ephemeral filesystem has nothing to lose. The free instance sleeps after about 15
+minutes idle and takes up to a minute to wake, so the first page load after a quiet
+spell is slow; that delay is the whole cost of the free plan, and the data is
+untouched while it sleeps.
 
-`STORAGE_DIR` is what ties the disk to the data. The database, `uploads/` and
-`signatures/` all live under it, so setting it to the disk's mount path in one
-place keeps every file that matters off the ephemeral filesystem. Anywhere outside
-that path is wiped on deploy.
+`STORAGE_DIR` and `khusela.db` are still supported for local development and tests,
+where no account and no network are wanted. A deployment simply sets
+`TURSO_DATABASE_URL`, and then the server writes nothing to disk at all.
 
 Prefer clicking to using the blueprint? Create a **Web Service** instead, with
-Build Command `npm ci`, Start Command `npm start` and health check path `/health`,
-add the variables from `render.yaml` by hand, and attach a disk with mount path
-`/var/data`.
+Build Command `npm ci`, Start Command `npm start`, health check path `/health` and
+plan **Free**, then add `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`,
+`ALLOWED_ORIGINS`, `REQUIRE_DOCUMENTS` and `ADMIN_API_KEY` by hand. Do not attach a
+disk: there is nothing to put on one.
 
 **Testing from a real phone before you deploy:** run the server locally and expose
 it with a tunnel (`cloudflared tunnel --url http://localhost:3000` or `ngrok http
@@ -142,9 +161,11 @@ tunnel origin to `ALLOWED_ORIGINS` for the duration of the test.
 1. Use HTTPS.
 2. Put the Node server behind Nginx/Cloudflare or another TLS reverse proxy.
 3. Use a strong random `ADMIN_API_KEY` and keep `.env` out of source control.
-4. Back up everything under `STORAGE_DIR` — `khusela.db`, `uploads/` and
-   `signatures/` (locally that is `storage/`, on Render `/var/data`) — securely.
-5. For multi-server/high-volume deployment, replace SQLite with PostgreSQL and object storage.
+4. Back up the database. At Turso that is `turso db dump khusela > backup.sql`;
+   locally it is just `storage/khusela.db`. Documents and signature images are
+   inside it, so one file covers everything.
+5. For multi-server/high-volume deployment, put SQLite behind a paid Turso plan (or
+   move to PostgreSQL) and keep the images in object storage.
 6. Configure `ALLOWED_ORIGINS` to the exact Khusela application domain.
 
 ## Important security design

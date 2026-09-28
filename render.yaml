@@ -3,33 +3,44 @@
 # In the Render Dashboard choose  New > Blueprint,  point it at this repository and
 # Render reads the settings below instead of you filling in every field by hand.
 #
-# WHY THERE IS A DISK
-# The SQLite database, the uploaded documents and the saved signatures are files on
-# disk. A Render service without a disk has an EPHEMERAL filesystem: Render wipes it
-# on every deploy and restart, which would delete the database and therefore every
-# pending signing link. Disks are only available on a paid instance, so the plan
-# below is "starter" (about 7 USD/month). "free" cannot hold the data.
+# WHY THERE IS NO DISK AND WHY THE PLAN IS FREE
+# This service keeps everything it needs in a Turso database (TURSO_DATABASE_URL) —
+# the invitations, the audit log, the uploaded documents and the signature images,
+# the last two as BLOB columns. Render's free instance has an EPHEMERAL filesystem
+# that it wipes on every deploy and restart, but there is nothing on it to lose.
+# The data itself is safe at Turso, which has its own free tier (5 GB, no card).
+#
+# Before the first deploy, create that database and copy its two values:
+#   1. Install the CLI:  npm i -g @tursodatabase/cli
+#   2. turso auth signup
+#   3. turso db create khusela
+#   4. turso db show khusela --url       -> libsql://khusela-<you>.turso.io
+#   5. turso db tokens create khusela    -> the auth token
+# Enter both in the service's Environment tab (Render prompts for the two
+# "sync: false" variables below rather than storing them in this repository).
 services:
   - type: web
     name: khusela-signature-backend
     runtime: node
     # Frankfurt is the closest Render region to South Africa (frankfurt, oregon,
-    # ohio, virginia, singapore). Change it if your clients are elsewhere.
+    # ohio, virginia, singapore).
     region: frankfurt
-    plan: starter
+    # The free instance sleeps after about 15 minutes idle and takes up to a minute
+    # to wake, so the first page load after a quiet spell is slow. That delay is the
+    # whole cost of the free plan; the data itself is unaffected while it sleeps.
+    plan: free
     buildCommand: npm ci
     startCommand: npm start
     # /health answers 200 once the server is up, so Render only shifts traffic over
     # after the database has opened.
     healthCheckPath: /health
-    disk:
-      name: khusela-data
-      mountPath: /var/data
-      sizeGB: 1
     envVars:
-      # Send every file to the mounted disk. Must match mountPath above.
-      - key: STORAGE_DIR
-        value: /var/data
+      # The database lives at Turso. Both values are secrets: keep them in the
+      # dashboard, never in this file.
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
       # PUBLIC_BASE_URL is deliberately NOT set: Render publishes the service's own
       # URL as RENDER_EXTERNAL_URL and the server uses that, so signing links point
       # at https://<service-name>.onrender.com straight away. Set PUBLIC_BASE_URL
