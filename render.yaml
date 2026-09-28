@@ -1,0 +1,51 @@
+# Render Blueprint for the Khusela signature backend.
+#
+# In the Render Dashboard choose  New > Blueprint,  point it at this repository and
+# Render reads the settings below instead of you filling in every field by hand.
+#
+# WHY THERE IS A DISK
+# The SQLite database, the uploaded documents and the saved signatures are files on
+# disk. A Render service without a disk has an EPHEMERAL filesystem: Render wipes it
+# on every deploy and restart, which would delete the database and therefore every
+# pending signing link. Disks are only available on a paid instance, so the plan
+# below is "starter" (about 7 USD/month). "free" cannot hold the data.
+services:
+  - type: web
+    name: khusela-signature-backend
+    runtime: node
+    # Frankfurt is the closest Render region to South Africa (frankfurt, oregon,
+    # ohio, virginia, singapore). Change it if your clients are elsewhere.
+    region: frankfurt
+    plan: starter
+    buildCommand: npm ci
+    startCommand: npm start
+    # /health answers 200 once the server is up, so Render only shifts traffic over
+    # after the database has opened.
+    healthCheckPath: /health
+    disk:
+      name: khusela-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      # Send every file to the mounted disk. Must match mountPath above.
+      - key: STORAGE_DIR
+        value: /var/data
+      # PUBLIC_BASE_URL is deliberately NOT set: Render publishes the service's own
+      # URL as RENDER_EXTERNAL_URL and the server uses that, so signing links point
+      # at https://<service-name>.onrender.com straight away. Set PUBLIC_BASE_URL
+      # here only if you attach a custom domain.
+      # Only this exact origin may call the API (no trailing slash, https required).
+      # Add your own PWA address here if it is not this one.
+      - key: ALLOWED_ORIGINS
+        value: https://itc-extractor.vercel.app
+      # A signing link is completed with a signature alone.
+      - key: REQUIRE_DOCUMENTS
+        value: "false"
+      - key: TOKEN_EXPIRY_DAYS
+        value: "7"
+      - key: MAX_UPLOAD_MB
+        value: "15"
+      # Render generates a strong secret. Read it under the service's Environment
+      # tab if you ever need to call the /api/admin/* endpoints.
+      - key: ADMIN_API_KEY
+        generateValue: true
