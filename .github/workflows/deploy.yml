@@ -1,0 +1,40 @@
+# Deploy on push.
+#
+# Render is not watching this repository (no GitHub App webhook), so a push here
+# changes the repository and nothing else — the running build keeps serving the
+# old code until someone tells Render to rebuild. This workflow tells it, using
+# the service's own Deploy Hook.
+#
+# One-time setup, about thirty seconds:
+#   1. Render -> the service -> Settings -> Deploy Hook -> copy the URL.
+#   2. This repository -> Settings -> Secrets and variables -> Actions ->
+#      New repository secret, named RENDER_DEPLOY_HOOK, value that URL.
+# Until that secret exists this workflow runs, says so, and stops — it never fails
+# a push, and it never prints the URL.
+#
+# The secret is read into an environment variable rather than written into the
+# command, so it stays out of the log even when the command is echoed.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ask Render to deploy the latest commit
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "RENDER_DEPLOY_HOOK is not set, so there is nothing to call."
+            echo "Render -> the service -> Settings -> Deploy Hook -> copy the URL,"
+            echo "then Settings -> Secrets and variables -> Actions on this repository."
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK"
+          echo "Render has been asked to deploy. It builds in the background; check"
+          echo "the service with: npm run check:deployed -- <service URL>"

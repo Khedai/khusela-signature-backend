@@ -103,11 +103,9 @@ npm test
 
 All three run on a scratch database in `storage/` and clean up after themselves.
 
-`npm test` never touches a deployment, so there is a separate command for asking a
-**deployed** service whether it is running the code in this repository:
-`npm run check:deployed` (see the deploy section below). It reads only — no
-credentials, nothing written — and exits non-zero while the service still serves
-an older build.
+`npm test` never touches a deployment. To ask a **deployed** service whether it is
+running this repository's code — reads only, no credentials, non-zero exit while it
+is stale — run `npm run check:deployed -- <service URL>` (see the deploy section).
 
 **Before deploying, run the same suites against the real database.** This is what
 turns "the settings look right" into evidence, because it uses the connection Render
@@ -184,32 +182,21 @@ to be pointed at the repository.
 5. Copy that URL into `khusela-itc-pwa/js/config.js` as `signatureApiBase`
    (see the PWA section above), commit it, and let Vercel redeploy.
 
-**Deploying a change later — a push does not do it here.** This service has no
-Deploy Hook and no GitHub App webhook, so `git push` changes the repository and
-nothing else: the running build keeps serving until it is told. Two ways to tell
-it — open the service in the Render dashboard and press **Deploy latest commit**,
-or copy its **Deploy Hook** URL (the service's Settings → Deploy Hook) and:
+**Deploying a change later — a push does not deploy here.** Render is not watching
+this repository, so `git push` changes the repository and nothing else. Either press
+**Deploy latest commit** on the service in the Render dashboard, or copy the
+service's **Deploy Hook** URL (Settings → Deploy Hook) and `curl -X POST '<that URL>'`.
+`.github/workflows/deploy.yml` does that last step for you on every push to `main`
+once the URL is in the repository's `RENDER_DEPLOY_HOOK` secret; until then it says
+so and does nothing.
 
-```bash
-curl -X POST 'https://api.render.com/deploy/srv-…?key=…'
-```
-
-A Deploy Hook is also what a GitHub Action calls, if you would rather pushes
-deploy themselves.
-
-Either way, the deploy is only done when the service says so — and the only way
-to know that the *running* build is the one you pushed is to ask it:
+To tell whether the running build is the one you pushed:
 
 ```bash
 npm run check:deployed -- https://khusela-signature-backend.onrender.com
 ```
 
-`tools/check_deployed.js` needs no credentials and writes nothing: it reads
-`/health`, the signing page, the script that page loads, and sends one request
-carrying the page's own Origin, then exits non-zero while any of it is still the
-old build. Run it after every deploy — "the deploy finished" and "the deploy is
-live" are not the same sentence on a free instance, and the difference is a
-client holding a link that does not work.
+It reads only, needs no credentials, and exits non-zero while the service is stale.
 
 **Why no disk is needed.** Every byte that matters — the invitations, the uploaded
 documents and the signature images — is a row in the Turso database, so Render's
