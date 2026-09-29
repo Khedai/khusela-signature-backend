@@ -286,7 +286,9 @@ app.post('/api/sign/:token/complete',express.json({limit:'1mb'}),wrap(async(req,
   if(isUniqueViolation(e)) return res.status(409).json({error:'This signing link has already been used'});
   throw e;
  }
- res.json({ok:true,signedAt:signed,message:'Signature recorded successfully. Thank you.'});
+ // The client is finished at this point, so the note says so rather than leaving
+ // them waiting on a page that will never change again.
+ res.json({ok:true,signedAt:signed,message:'Signature recorded successfully. Thank you. You can close this browser window now.'});
 }));
 
 app.get('/api/admin/invites',requireAdmin,wrap(async(req,res)=>{

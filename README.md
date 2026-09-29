@@ -77,6 +77,11 @@ The consultant presses **Send Signing Link** next to Applicant 1 or 2, sends the
 copied link to that applicant (WhatsApp, SMS, e-mail), and the captured
 signature appears in that applicant's box and in the PDF the PWA e-mails.
 
+Once the signature is recorded the client's page says so, tells them the browser
+window can be closed, wipes the signature pad and switches both buttons off. A
+client who leaves the tab open therefore cannot sign a second time that would
+never be sent, nor mistake a signed pad for a form that still has to go.
+
 ## Tests
 ```bash
 npm test

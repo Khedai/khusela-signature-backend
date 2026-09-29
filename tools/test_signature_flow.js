@@ -123,6 +123,14 @@ try {
   });
   const comp = await compRes.json();
   check('signature accepted without documents', compRes.status === 200, JSON.stringify(comp));
+  // The client has no reason to stay on the page, so the note has to say so — and
+  // the page must not keep a signed stroke on screen with both buttons live, or the
+  // client reads it as a form that still has to be sent.
+  check('the note tells the client the browser window can be closed',
+    /close this browser window/i.test(comp.message || ''), comp.message);
+  check('the page clears the pad, refuses further strokes and switches the buttons off when the signature lands',
+    /done\s*=\s*true/.test(scriptSrc) && /clearPad\(\)/.test(scriptSrc)
+      && /if\(done\)return/.test(scriptSrc) && /!\s*drawing\s*\|\|\s*done/.test(scriptSrc));
 
   // 5. The PWA sees it and can display it in the box.
   man = await (await fetch(BASE + '/api/manage/' + inv.manageToken)).json();
