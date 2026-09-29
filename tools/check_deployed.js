@@ -1,10 +1,12 @@
 // Is the deployed service running the code in this repository?
 //
 // Deploying this server is the one step that no test here can do: Render has to
-// be told, and this repository is not what tells it. The service does not watch
-// the repository, so a push reaches it only because .github/workflows/deploy.yml
-// calls the service's Deploy Hook — and when that call fails, or the secret it
-// needs is missing, `git push` changes nothing that is live. That left a gap this
+// be told, and this repository is not what tells it. Unless the service's Settings
+// show Auto-Deploy as "On Commit" — in which case Render is watching after all and
+// a push deploys by itself — a push reaches the service only because
+// .github/workflows/deploy.yml calls Render for it, through the API or the service's
+// Deploy Hook, and when that call fails, or the credential it needs is missing,
+// `git push` changes nothing that is live. That left a gap this
 // file closes: after a deploy, or when a link misbehaves in a client's hands,
 // there was no way to ask "is the running build the one I pushed?" without a
 // browser and a signing link.
