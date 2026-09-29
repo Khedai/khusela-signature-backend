@@ -22,13 +22,22 @@ if(/^https?:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/i.test(BASE)){
 // Every request reaches this process through the host's own proxy, so the socket
 // peer is that proxy and not the client. On Render that made every signature row
 // record "::1" as the IP: a value that identifies nobody and leaves the audit trail
-// unable to say where a signature came from. Trusting exactly one hop makes req.ip
-// the address the proxy appended to X-Forwarded-For, and a caller cannot forge it by
-// sending its own X-Forwarded-For, because a forged entry sits further left in the
-// chain than the one the proxy appended. Set TRUST_PROXY_HOPS=0 if this server is
-// ever exposed directly to the internet: there, that header is whatever the caller
-// chose to write, and nothing in it should be believed.
-const TRUST_PROXY_HOPS=Math.max(0,Number(process.env.TRUST_PROXY_HOPS??1));
+// unable to say where a signature came from. Trusting the right number of hops makes
+// req.ip the address the proxy appended to X-Forwarded-For, and a caller cannot
+// forge it by sending its own X-Forwarded-For, because a forged entry sits further
+// left in the chain than the one the proxy appended.
+//
+// The number is measured, not assumed. On 2026-09-29 a real signing request reached
+// Render carrying 165.0.11.224, 172.68.247.29, 10.24.207.248 — the client, Render's
+// edge, Render's internal hop — so Render appends three entries and trusting one
+// landed on an address inside Render. Render publishes RENDER_SERVICE_ID and
+// RENDER_EXTERNAL_URL on a service, so a Render host gets three without anyone
+// having to configure it, and TRUST_PROXY_HOPS overrides that where a chain differs
+// (a service with its own proxy in front, an Nginx hop, or a host that is not
+// Render at all, where one is a guess in the safe direction: under-trusting costs a
+// less useful address, over-trusting lets a caller name itself in the record).
+const ON_RENDER=!!(process.env.RENDER||process.env.RENDER_SERVICE_ID||process.env.RENDER_EXTERNAL_URL);
+const TRUST_PROXY_HOPS=Math.max(0,Number(process.env.TRUST_PROXY_HOPS??(ON_RENDER?3:1)));
 // POST /api/invite is the one route with no token to check — the consultant's app
 // calls it straight from the browser to mint a signing link. INVITE_API_KEY, when
 // set, is a real secret and the caller must send it as x-invite-key (or as a bearer

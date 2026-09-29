@@ -43,6 +43,11 @@ const child = spawn(process.execPath, ['server.js'], {
     // Small enough to reach in a test and large enough that the flow above never
     // meets it: the limiter is per address, and every request there is local.
     INVITE_RATE_LIMIT: '8', INVITE_RATE_WINDOW_MS: '60000',
+    // This suite stands in for one proxy hop (the checks below put a public address
+    // in X-Forwarded-For and expect it to be the one recorded). Render appends three,
+    // which its own RENDER_SERVICE_ID selects; naming it here keeps the result the
+    // same no matter what the machine running the suite happens to have set.
+    TRUST_PROXY_HOPS: '1',
   }),
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -359,7 +364,9 @@ try {
   //     nothing but the key is accepted — including the app's own request, which is
   //     exactly why it stays off until the PWA sends one. A second instance on a
   //     second port, with its own scratch database, is what makes that path testable
-  //     before it is ever switched on in production.
+  //     before it is ever switched on in production. It also says it is hosted by
+  //     Render (RENDER_SERVICE_ID), which is how the hop count a real Render chain
+  //     needs gets checked without Render.
   const KEY_PORT = 3902;
   const KEY_BASE = 'http://127.0.0.1:' + KEY_PORT;
   const KEY_DB = path.join(ROOT, 'storage', '_e2e_test_key.db');
@@ -369,7 +376,7 @@ try {
     env: Object.assign({}, process.env, {
       PORT: String(KEY_PORT), TURSO_DATABASE_URL: 'file:./storage/_e2e_test_key.db', PUBLIC_BASE_URL: KEY_BASE,
       ALLOWED_ORIGINS: 'https://itc-extractor.vercel.app', ADMIN_API_KEY: 'test-key', REQUIRE_DOCUMENTS: 'false',
-      INVITE_API_KEY: 'suite-invite-key',
+      INVITE_API_KEY: 'suite-invite-key', RENDER_SERVICE_ID: 'srv-suite',
     }),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -404,6 +411,26 @@ try {
       method: 'POST', headers: Object.assign({ Authorization: 'Bearer suite-invite-key' }, appHeaders), body: inviteBody,
     });
     check('the key is accepted as a bearer token too', bearer.status === 200, 'HTTP ' + bearer.status);
+
+    // The Render default, which is why this instance sets RENDER_SERVICE_ID and no
+    // hop count: three appends are trusted, so the address recorded is the one at
+    // that offset — the client's — and not Render's internal hop. Entries a caller
+    // adds for itself sit further left and change nothing.
+    const chain = '198.51.100.9, 172.68.247.29, 10.24.207.248';
+    await fetch(KEY_BASE + '/api/sign/' + keyOkBody.signingLink.split('/').pop() + '/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': chain },
+      body: JSON.stringify({ signature: PNG }),
+    });
+    const keyAdmin = await (await fetch(KEY_BASE + '/api/admin/invite/' + keyOkBody.invitationId,
+      { headers: { 'x-admin-key': 'test-key' } })).json();
+    check('a host that says it is Render records the client\'s address, not its internal hop',
+      keyAdmin.signature && keyAdmin.signature.ip === '198.51.100.9', JSON.stringify(keyAdmin.signature));
+    const keyEntry = (keyAdmin.audit || []).find((a) => a.event === 'client_signed');
+    let keyMeta = null;
+    try { keyMeta = JSON.parse(keyEntry.meta); } catch (e) { keyMeta = null; }
+    check('and keeps the chain it arrived in beside it',
+      !!keyMeta && keyMeta.xff === chain, keyEntry ? keyEntry.meta : 'no client_signed entry');
   } finally {
     keyChild.kill();
     await new Promise((r) => setTimeout(r, 800));

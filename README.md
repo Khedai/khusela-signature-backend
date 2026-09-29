@@ -253,15 +253,17 @@ failed, and the log names the setting to check.
 
 ## Production requirements
 1. Use HTTPS.
-2. Put the Node server behind Nginx/Cloudflare or another TLS reverse proxy, and set
-   `TRUST_PROXY_HOPS` to the number of proxies that append to `X-Forwarded-For`
-   before this server sees the request — Render's `render.yaml` sets 3, because a
-   real signing request arrived as `165.0.11.224, 172.68.247.29, 10.29.92.62` (the
-   client, Render's edge, Render's internal hop). Too few and the address stored with
-   a signature is an address inside the host, which is what `::1` was; too many and a
+2. Put the Node server behind Nginx/Cloudflare or another TLS reverse proxy. A host
+   that says it is Render — a Render service publishes `RENDER_SERVICE_ID` and
+   `RENDER_EXTERNAL_URL` — trusts three appends to `X-Forwarded-For` by itself,
+   because that is what a real signing request showed (arriving as
+   `165.0.11.224, 172.68.247.29, 10.24.207.248`: the client, Render's edge, Render's
+   internal hop). Everywhere else the default is one, and `TRUST_PROXY_HOPS` overrides
+   either. Both ways of being wrong matter: too few and the address stored with a
+   signature is an address inside the host, which is what `::1` was; too many and a
    caller could name itself. The live harness signs and then compares the stored
-   address with the address the machine really is, so a wrong number here fails
-   loudly instead of quietly recording something meaningless.
+   address with the address the machine really is, so a wrong number fails loudly
+   instead of quietly recording something meaningless.
 3. Use a strong random `ADMIN_API_KEY` and keep `.env` out of source control.
 4. Back up the database. At Turso that is `turso db dump khusela > backup.sql`;
    locally it is just `storage/khusela.db`. Documents and signature images are
