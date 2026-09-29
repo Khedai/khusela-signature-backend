@@ -4,7 +4,7 @@ Production-oriented Node.js/Express backend for the Khusela application.
 
 ## What it provides
 - `POST /api/invite` — creates a random, expiring, one-time signing link. Returns the link plus a **manage token** (see below). Accepts `signerLabel` (e.g. `Applicant 1`) and `applicationRef` so one application can have several signatories.
-- `GET /sign/:token` — the signing page the client opens, i.e. the link `POST /api/invite` returns. One static file serves every token (it reads the token out of its own path); an unknown, expired or already-used link is reported by the page itself. This page is the only thing the client ever sees — there is nothing to log into. The page's code is the separate same-origin file `public/sign.js`: helmet's default Content-Security-Policy here is `script-src 'self'`, so an inline `<script>` is refused by the browser and the client would sit on "Loading your secure signing session…" for ever.
+- `GET /sign/:token` — the signing page the client opens, i.e. the link `POST /api/invite` returns. One static file serves every token (it reads the token out of its own path); an unknown, expired or already-used link is reported by the page itself. This page is the only thing the client ever sees — there is nothing to log into. The page's code is the separate same-origin file `public/sign.js`: helmet's default Content-Security-Policy here is `script-src 'self'`, so an inline `<script>` is refused by the browser and the client would sit on "Loading your secure signing session…" for ever. That script measures the signature pad twice for a second reason: the form holding the canvas starts `hidden`, so the measurement taken while the script loads is 0 x 0, and a zero-sized element receives no touch or click at all — the client would have nothing to sign on.
 - `GET /api/sign/:token` — validates the secure link and returns only the client-facing data needed by the signing page.
 - `POST /api/sign/:token/upload` — accepts ID, payslip and bank-statement files (PDF/JPG/PNG).
 - `POST /api/sign/:token/complete` — stores the drawn signature, timestamp, IP and user-agent and permanently consumes the link.
@@ -59,6 +59,13 @@ The existing Generate Signing Link button already calls `/api/invite` and uses t
    ```
    ALLOWED_ORIGINS=https://itc-extractor.vercel.app,https://your-domain.co.za
    ```
+   The PWA is the only origin you list. The signing page is served by this server
+   itself, so the browser stamps the client's upload and complete requests with
+   this server's own origin; that origin is allowed automatically, which is why a
+   custom domain needs no second entry. (Listing the PWA and nothing else once
+   left the client's two writes refused with a `403 CORS origin denied` — the page
+   could load a session and then never submit, and no request without an `Origin`
+   header, such as curl, could show it.)
 3. `PUBLIC_BASE_URL` must be the public HTTPS address of **this** server — it is
    what the generated signing link is built from. On Render this is picked up
    automatically from `RENDER_EXTERNAL_URL`, so leave it empty there.

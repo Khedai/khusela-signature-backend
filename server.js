@@ -95,8 +95,17 @@ const app=express();
 app.disable('x-powered-by');
 app.use(helmet({crossOriginResourcePolicy:{policy:'cross-origin'}}));
 const origins=(process.env.ALLOWED_ORIGINS||'*').split(',').map(x=>x.trim());
+// The signing page the client is sent is served by this same service, so the
+// browser labels the client's upload and complete POSTs with this service's own
+// origin — an origin ALLOWED_ORIGINS does not list, because that setting names
+// the consultant's app. Those two requests were therefore refused with a 403
+// "CORS origin denied": the client could read the session (a same-origin GET
+// carries no Origin header at all) and then never submit a signature. No test
+// without an Origin header — curl, the suites — could show it. Its own origin is
+// trusted here instead, and because BASE is derived exactly as the signing links
+// are, a custom domain keeps working without a second setting to remember.
 app.use(cors({origin:(origin,cb)=>{
- if(!origin||origins.includes('*')||origins.includes(origin)) return cb(null,true);
+ if(!origin||origins.includes('*')||origins.includes(origin)||origin===BASE) return cb(null,true);
  // A refused origin is an authorization failure, not a malformed request. The
  // status is attached so the error handler below keeps it a 4xx.
  const denied=new Error('CORS origin denied'); denied.status=403; cb(denied);

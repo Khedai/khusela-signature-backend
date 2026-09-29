@@ -98,6 +98,13 @@ try {
   check('that script is valid JavaScript the browser will parse (V8)', !parseError, parseError || 'parses');
   check('it reads the token out of the path and posts the signature to /complete',
     scriptSrc.includes('location.pathname') && scriptSrc.includes('/complete'));
+  // A pad that cannot be drawn on is the same dead page in different clothes.
+  // The form (and the canvas with it) starts `hidden`, so the measurement taken
+  // at parse time is 0 x 0, and a zero-sized element receives no pointer events
+  // at all: no stroke, no signature. The pad must be measured again once the
+  // form is on screen, or the client has nothing to sign with.
+  check('the signature pad is measured again once the form is on screen, not only while it is hidden',
+    /hidden\s*=\s*false\s*;\s*size\(\)/.test(scriptSrc));
 
   const sign = await (await fetch(BASE + '/api/sign/' + token)).json();
   check('signerLabel echoed to the signing page', sign.signerLabel === 'Applicant 1', JSON.stringify(sign));
@@ -160,6 +167,27 @@ try {
   check('a trailing slash in the origin list does NOT match',
     slash.status >= 400 || !slash.headers.get('access-control-allow-origin'),
     'status ' + slash.status);
+
+  // 7b. The client's own page is served by THIS service, so the browser stamps
+  //     the client's upload and complete POSTs with this service's own origin.
+  //     That origin is not in ALLOWED_ORIGINS (which names the consultant's
+  //     app), so both were answered 403 "CORS origin denied": the client could
+  //     load a session and then never submit, in the browser only — every
+  //     request without an Origin header is allowed, which is why the suites
+  //     never saw it. An unknown token makes this probe a 404 when it is
+  //     allowed, so it asserts the origin rule without signing anything.
+  const ownOrigin = await fetch(BASE + '/api/sign/not-a-real-token/complete', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: BASE }, body: '{}',
+  });
+  check("a POST from the signing page's own origin is not refused",
+    ownOrigin.status !== 403, 'HTTP ' + ownOrigin.status + ' ' + JSON.stringify(await ownOrigin.json()));
+
+  // Allowing the service its own origin must not let anyone else in.
+  const stranger = await fetch(BASE + '/api/sign/not-a-real-token/complete', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://evil.example.com' }, body: '{}',
+  });
+  check('a POST carrying an unlisted origin is still refused with 403',
+    stranger.status === 403, 'HTTP ' + stranger.status);
 
   // 8. Admin access: a missing or wrong-length key must be a clean 401, not the
   //    400 the constant-time comparison used to produce.
