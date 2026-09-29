@@ -122,6 +122,33 @@ try {
   check('a POST from the signing page\'s own origin (' + ORIGIN + ') is not refused',
     own.status !== 403, 'HTTP ' + own.status + ' ' + oneLine(own.body));
 
+  // 7. Minting a link is the one action with no token attached, because the app
+  //    calls it from a browser, so a caller that presents neither the app's Origin
+  //    nor a key has to be refused. Asked of a deployed address only: on this
+  //    machine the endpoint is open to local callers by design (the suites use it),
+  //    and a 200 there is correct — it would fail this check for the wrong reason.
+  //    A refused request writes nothing, so this still reads only.
+  const localBase = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|$)/i.test(BASE);
+  if (localBase) {
+    console.log('  --   a headerless invite request is refused (skipped: ' + BASE
+      + ' is local, where local callers are allowed on purpose)');
+  } else {
+    let invite = { status: 0, body: '' };
+    try {
+      const res = await fetch(BASE + '/api/invite', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clientName: 'deploy-check', idNumber: '9001015800083' }),
+      });
+      invite = { status: res.status, body: await res.text() };
+    } catch (e) { invite = { status: 0, body: e.message }; }
+    check('a headerless invite request from elsewhere is refused instead of minting a link',
+      invite.status === 401, 'HTTP ' + invite.status + ' ' + oneLine(invite.body));
+    console.log('  --   /health: the invite endpoint is '
+      + (health.body && health.body.inviteProtected === true
+        ? 'protected by INVITE_API_KEY'
+        : 'unprotected — INVITE_API_KEY is not set, so the Origin rule and the rate limit are what stand'));
+  }
+
   console.log('');
   if (fail) {
     console.log(fail + ' of ' + (pass + fail) + ' checks failed: this service is NOT running the code in this repository (or is misconfigured).');

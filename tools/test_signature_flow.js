@@ -40,6 +40,9 @@ const child = spawn(process.execPath, ['server.js'], {
     // libsql://…), which is the path Render uses; unset it to use a scratch file.
     PORT: String(PORT), TURSO_DATABASE_URL: process.env.E2E_DB_URL || 'file:./storage/_e2e_test.db', PUBLIC_BASE_URL: BASE,
     ALLOWED_ORIGINS: 'https://itc-extractor.vercel.app', ADMIN_API_KEY: 'test-key', REQUIRE_DOCUMENTS: 'false',
+    // Small enough to reach in a test and large enough that the flow above never
+    // meets it: the limiter is per address, and every request there is local.
+    INVITE_RATE_LIMIT: '8', INVITE_RATE_WINDOW_MS: '60000',
   }),
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -197,6 +200,88 @@ try {
   check('a POST carrying an unlisted origin is still refused with 403',
     stranger.status === 403, 'HTTP ' + stranger.status);
 
+  // 7c. Who may mint a signing link. This instance runs without INVITE_API_KEY, so
+  //     POST /api/invite falls back to "callers that look like the consultant's app,
+  //     or that come from this machine" — which is why every invite above works.
+  //     What must not work is a stranger's headerless request. A public
+  //     X-Forwarded-For is how a request from elsewhere is presented to a server
+  //     that trusts one proxy hop, which is what this suite runs.
+  const healthHere = await (await fetch(BASE + '/health')).json();
+  check('/health reports the invite endpoint as unprotected while INVITE_API_KEY is unset',
+    healthHere.inviteProtected === false, JSON.stringify(healthHere));
+  const refused = await fetch(BASE + '/api/invite', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '203.0.113.9' },
+    body: JSON.stringify({ clientName: 'Stranger', idNumber: '9001015800083' }),
+  });
+  check('a headerless invite request from a public address is refused with 401',
+    refused.status === 401, 'HTTP ' + refused.status + ' ' + (await refused.text()).slice(0, 120));
+
+  // The app's own request always carries its Origin, so that one still works — from
+  // a public address as well, which shows the refusal above was the missing Origin
+  // and not the address it came from.
+  const appInvite = await fetch(BASE + '/api/invite', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '203.0.113.10', Origin: 'https://itc-extractor.vercel.app' },
+    body: JSON.stringify({ clientName: 'App Caller', idNumber: '9001015800083', applicationRef: 'INVITE-GATE-CHECK' }),
+  });
+  const appInviteBody = await appInvite.json();
+  check('the same request carrying the app\'s Origin header is accepted (the PWA path)',
+    appInvite.status === 200 && !!appInviteBody.signingLink,
+    'HTTP ' + appInvite.status + ' ' + JSON.stringify(appInviteBody).slice(0, 120));
+
+  // The limit is real, and it counts refused requests too, so a script cannot
+  // hammer the route by being refused: the ninth request from one address inside
+  // the window is answered 429 rather than creating a tenth link.
+  const limiterIp = '198.51.100.7';
+  const limiter = [];
+  for (let i = 1; i <= 9; i++) {
+    limiter.push(await fetch(BASE + '/api/invite', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': limiterIp, Origin: 'https://itc-extractor.vercel.app' },
+      body: JSON.stringify({ clientName: 'Rate ' + i, idNumber: '9001015800083', applicationRef: 'RATE-LIMIT-CHECK' }),
+    }));
+  }
+  check('the ninth invite from one address is refused with 429 (INVITE_RATE_LIMIT=8 here)',
+    limiter.filter((r) => r.status === 200).length === 8 && limiter[8].status === 429,
+    limiter.map((r) => r.status).join(','));
+
+  // 7d. What the audit remembers about where a request came from. One proxy hop is
+  //     trusted, so the address that hop appended is the client's; a chain the
+  //     caller wrote itself must not be able to put a different address in the row,
+  //     and the whole chain is kept next to it either way. The address that ends up
+  //     with a signature is the one the SIGNING request came from, so that is where
+  //     the chain is written here.
+  const addressInvite = async () => (await fetch(BASE + '/api/invite', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: 'https://itc-extractor.vercel.app' },
+    body: JSON.stringify({ clientName: 'Address Check', idNumber: '9001015800083', applicationRef: 'ADDRESS-CHECK' }),
+  })).json();
+  const signFrom = async (chain) => {
+    const inv = await addressInvite();
+    await fetch(BASE + '/api/sign/' + inv.signingLink.split('/').pop() + '/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': chain },
+      body: JSON.stringify({ signature: PNG }),
+    });
+    return inv;
+  };
+  const oneHop = await signFrom('203.0.113.11');
+  const forged = await signFrom('9.9.9.9, 203.0.113.12');
+  const adminOf = async (id) => (await fetch(BASE + '/api/admin/invite/' + id,
+    { headers: { 'x-admin-key': 'test-key' } })).json();
+  const oneHopRow = await adminOf(oneHop.invitationId);
+  check('the address recorded with a signature is the one the proxy appended',
+    oneHopRow.signature && oneHopRow.signature.ip === '203.0.113.11', JSON.stringify(oneHopRow.signature));
+  const forgedRow = await adminOf(forged.invitationId);
+  check('a caller cannot name itself in the row by writing X-Forwarded-For',
+    forgedRow.signature && forgedRow.signature.ip === '203.0.113.12', JSON.stringify(forgedRow.signature));
+  const signedEntry = (forgedRow.audit || []).find((a) => a.event === 'client_signed');
+  let signedMeta = null;
+  try { signedMeta = JSON.parse(signedEntry.meta); } catch (e) { signedMeta = null; }
+  check('the audit entry keeps the whole chain the request arrived in (meta.xff)',
+    !!signedMeta && signedMeta.xff === '9.9.9.9, 203.0.113.12', signedEntry ? signedEntry.meta : 'no client_signed entry');
+
   // 8. Admin access: a missing or wrong-length key must be a clean 401, not the
   //    400 the constant-time comparison used to produce.
   const noKey = await fetch(BASE + '/api/admin/invites');
@@ -269,6 +354,61 @@ try {
     SIG_DIR + ' holds ' + countFiles(SIG_DIR) + ' files, was ' + sigFilesBefore);
   check('uploading wrote no file to disk', countFiles(UPLOAD_DIR) === upFilesBefore,
     UPLOAD_DIR + ' holds ' + countFiles(UPLOAD_DIR) + ' files, was ' + upFilesBefore);
+
+  // 12. The switch that closes POST /api/invite properly: with INVITE_API_KEY set,
+  //     nothing but the key is accepted — including the app's own request, which is
+  //     exactly why it stays off until the PWA sends one. A second instance on a
+  //     second port, with its own scratch database, is what makes that path testable
+  //     before it is ever switched on in production.
+  const KEY_PORT = 3902;
+  const KEY_BASE = 'http://127.0.0.1:' + KEY_PORT;
+  const KEY_DB = path.join(ROOT, 'storage', '_e2e_test_key.db');
+  for (const f of [KEY_DB, KEY_DB + '-wal', KEY_DB + '-shm']) { try { fs.rmSync(f, { force: true }); } catch (e) {} }
+  const keyChild = spawn(process.execPath, ['server.js'], {
+    cwd: ROOT,
+    env: Object.assign({}, process.env, {
+      PORT: String(KEY_PORT), TURSO_DATABASE_URL: 'file:./storage/_e2e_test_key.db', PUBLIC_BASE_URL: KEY_BASE,
+      ALLOWED_ORIGINS: 'https://itc-extractor.vercel.app', ADMIN_API_KEY: 'test-key', REQUIRE_DOCUMENTS: 'false',
+      INVITE_API_KEY: 'suite-invite-key',
+    }),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  keyChild.stdout.on('data', () => {});
+  keyChild.stderr.on('data', () => {});
+  try {
+    let keyReady = false;
+    for (let i = 0; i < 80 && !keyReady; i++) {
+      try { keyReady = (await fetch(KEY_BASE + '/api/sign/nope')).status === 404; } catch (e) {}
+      if (!keyReady) await new Promise((r) => setTimeout(r, 250));
+    }
+    check('a second instance starts with INVITE_API_KEY set', keyReady);
+    const keyHealth = await (await fetch(KEY_BASE + '/health')).json();
+    check('/health reports the invite endpoint as protected once a key is set',
+      keyHealth.inviteProtected === true, JSON.stringify(keyHealth));
+    const appHeaders = { 'Content-Type': 'application/json', Origin: 'https://itc-extractor.vercel.app' };
+    const inviteBody = JSON.stringify({ clientName: 'Key Check', idNumber: '9001015800083' });
+    const noKey = await fetch(KEY_BASE + '/api/invite', { method: 'POST', headers: appHeaders, body: inviteBody });
+    check('the app Origin alone is not enough once a key is set (401)', noKey.status === 401, 'HTTP ' + noKey.status);
+    const wrongKey = await fetch(KEY_BASE + '/api/invite', {
+      method: 'POST', headers: Object.assign({ 'x-invite-key': 'not-the-key' }, appHeaders), body: inviteBody,
+    });
+    check('a key of the wrong length is refused as a wrong key, not as a fault (401)',
+      wrongKey.status === 401, 'HTTP ' + wrongKey.status);
+    const keyOk = await fetch(KEY_BASE + '/api/invite', {
+      method: 'POST', headers: Object.assign({ 'x-invite-key': 'suite-invite-key' }, appHeaders), body: inviteBody,
+    });
+    const keyOkBody = await keyOk.json();
+    check('the key is accepted and a link comes back', keyOk.status === 200 && !!keyOkBody.signingLink,
+      'HTTP ' + keyOk.status + ' ' + JSON.stringify(keyOkBody).slice(0, 120));
+    const bearer = await fetch(KEY_BASE + '/api/invite', {
+      method: 'POST', headers: Object.assign({ Authorization: 'Bearer suite-invite-key' }, appHeaders), body: inviteBody,
+    });
+    check('the key is accepted as a bearer token too', bearer.status === 200, 'HTTP ' + bearer.status);
+  } finally {
+    keyChild.kill();
+    await new Promise((r) => setTimeout(r, 800));
+    for (const f of [KEY_DB, KEY_DB + '-wal', KEY_DB + '-shm']) { try { fs.rmSync(f, { force: true }); } catch (e) {} }
+  }
 } catch (e) {
   fail++;
   console.log('  FAIL exception -- ' + (e && e.message));

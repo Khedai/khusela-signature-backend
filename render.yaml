@@ -63,6 +63,14 @@ services:
         value: "7"
       - key: MAX_UPLOAD_MB
         value: "15"
+      # Minting a signing link is the one action with no token to check (the PWA
+      # calls it from a browser). INVITE_API_KEY is deliberately NOT set here: the
+      # PWA has to send it first or its "Send Signing Link" button stops working.
+      # Until it is set, /health reports inviteProtected:false and the route
+      # accepts only callers with an allowed Origin (the PWA) or a local one, on top
+      # of INVITE_RATE_LIMIT (20 per address per 10 minutes). TRUST_PROXY_HOPS is 1
+      # because Render's proxy is the only hop in front of this service, which is
+      # what makes the IP recorded with a signature the client's and not "::1".
       # Render generates a strong secret. Read it under the service's Environment
       # tab if you ever need to call the /api/admin/* endpoints.
       - key: ADMIN_API_KEY

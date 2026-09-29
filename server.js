@@ -19,6 +19,25 @@ const BASE=(process.env.PUBLIC_BASE_URL||process.env.RENDER_EXTERNAL_URL||`http:
 if(/^https?:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/i.test(BASE)){
  console.warn(`WARNING: no public URL is configured. Signing links will point at ${BASE} and will only open on this machine.`);
 }
+// Every request reaches this process through the host's own proxy, so the socket
+// peer is that proxy and not the client. On Render that made every signature row
+// record "::1" as the IP: a value that identifies nobody and leaves the audit trail
+// unable to say where a signature came from. Trusting exactly one hop makes req.ip
+// the address the proxy appended to X-Forwarded-For, and a caller cannot forge it by
+// sending its own X-Forwarded-For, because a forged entry sits further left in the
+// chain than the one the proxy appended. Set TRUST_PROXY_HOPS=0 if this server is
+// ever exposed directly to the internet: there, that header is whatever the caller
+// chose to write, and nothing in it should be believed.
+const TRUST_PROXY_HOPS=Math.max(0,Number(process.env.TRUST_PROXY_HOPS??1));
+// POST /api/invite is the one route with no token to check — the consultant's app
+// calls it straight from the browser to mint a signing link. INVITE_API_KEY, when
+// set, is a real secret and the caller must send it as x-invite-key (or as a bearer
+// token). The app has to be updated to send it before this can be switched on, so
+// while it is unset the route falls back to accepting only callers that look like
+// that app or come from this machine, and startup says so rather than leaving the
+// state to be discovered.
+const INVITE_KEY=process.env.INVITE_API_KEY||'';
+if(!INVITE_KEY) console.warn('WARNING: POST /api/invite has no INVITE_API_KEY set. It accepts callers that present a trusted Origin header or come from this machine; an Origin header can be forged, so set INVITE_API_KEY (and send it from the app) to require a secret.');
 // The database is either a managed Turso database or, in development, a local
 // file — db.js decides which from the environment. Nothing the server stores is
 // written to the local filesystem, so a host with a disposable disk (Render's
@@ -93,8 +112,14 @@ try{
 
 const app=express();
 app.disable('x-powered-by');
+// Behind the host's own proxy this is what makes req.ip the client's address rather
+// than the proxy's; see TRUST_PROXY_HOPS above.
+app.set('trust proxy',TRUST_PROXY_HOPS);
 app.use(helmet({crossOriginResourcePolicy:{policy:'cross-origin'}}));
 const origins=(process.env.ALLOWED_ORIGINS||'*').split(',').map(x=>x.trim());
+// One predicate for "this origin is allowed to talk to this service", shared by the
+// CORS rule below and by the invite gate further down so the two cannot drift apart.
+const originAllowed=origin=>!origin||origins.includes('*')||origins.includes(origin)||origin===BASE;
 // The signing page the client is sent is served by this same service, so the
 // browser labels the client's upload and complete POSTs with this service's own
 // origin — an origin ALLOWED_ORIGINS does not list, because that setting names
@@ -105,7 +130,7 @@ const origins=(process.env.ALLOWED_ORIGINS||'*').split(',').map(x=>x.trim());
 // trusted here instead, and because BASE is derived exactly as the signing links
 // are, a custom domain keeps working without a second setting to remember.
 app.use(cors({origin:(origin,cb)=>{
- if(!origin||origins.includes('*')||origins.includes(origin)||origin===BASE) return cb(null,true);
+ if(originAllowed(origin)) return cb(null,true);
  // A refused origin is an authorization failure, not a malformed request. The
  // status is attached so the error handler below keeps it a 4xx.
  const denied=new Error('CORS origin denied'); denied.status=403; cb(denied);
@@ -136,11 +161,60 @@ function requireAdmin(req,res,next){
  next();
 }
 
+// ── Who may mint a signing link ──────────────────────────────────────────────
+// POST /api/invite writes a row and hands back a capability link, and it has no
+// session or token to check, because the consultant's app calls it from a browser.
+// Two things stand in for one. INVITE_API_KEY, when set, is a real secret (see the
+// top of this file): the caller must present it and nothing else counts. With no key
+// configured the caller must instead look like the app this was written for — an
+// allowed Origin header, or a request from this machine (the suites and local
+// tools). An Origin header is forgeable, so that is a floor and not a lock; what it
+// removes is the "mint a link with one headerless curl" path. Which state this
+// service is in is reported by /health as inviteProtected, so it is never a guess.
+function presentedInviteKey(req){
+ const header=req.get('x-invite-key');
+ if(header) return header;
+ const bearer=/^Bearer\s+(.+)$/i.exec(req.get('authorization')||'');
+ return bearer?bearer[1]:'';
+}
+// Fixed-length digests, for the same reason requireAdmin compares them: a key of the
+// wrong length has to read as "wrong key" rather than as a crash.
+function sameSecret(a,b){return crypto.timingSafeEqual(
+ crypto.createHash('sha256').update(String(a)).digest(),
+ crypto.createHash('sha256').update(String(b)).digest());}
+// A request from this machine is a developer or a test, never a client's phone.
+function isLocalAddress(ip){return ip==='::1'||ip==='127.0.0.1'||/^::ffff:127\./.test(String(ip||''));}
+function inviteAuthorized(req){
+ if(INVITE_KEY) return sameSecret(presentedInviteKey(req),INVITE_KEY);
+ const origin=req.get('origin');
+ return (!!origin&&originAllowed(origin))||isLocalAddress(req.ip);
+}
+// Minting a link costs a database row, so it is also the cheapest thing here to abuse
+// in bulk. A per-address window — 20 in 10 minutes by default — keeps one script from
+// filling the database; INVITE_RATE_LIMIT=0 switches it off. The counters live in this
+// process, so a redeploy forgets them: that is the honest limit of a limiter with no
+// shared store behind it.
+const INVITE_LIMIT=Math.max(0,Number(process.env.INVITE_RATE_LIMIT??20));
+const INVITE_WINDOW_MS=Math.max(1000,Number(process.env.INVITE_RATE_WINDOW_MS||600000));
+const inviteHits=new Map();
+if(INVITE_LIMIT) setInterval(()=>{const t=Date.now();for(const[k,e] of inviteHits) if(t-e.start>=INVITE_WINDOW_MS) inviteHits.delete(k);},INVITE_WINDOW_MS).unref();
+function inviteRateLimit(req,res,next){
+ if(!INVITE_LIMIT) return next();
+ const who=String(req.ip||'unknown'); const t=Date.now();
+ let e=inviteHits.get(who);
+ if(!e||t-e.start>=INVITE_WINDOW_MS){e={start:t,n:0};inviteHits.set(who,e);}
+ e.n++;
+ if(e.n<=INVITE_LIMIT) return next();
+ const wait=Math.max(1,Math.ceil((e.start+INVITE_WINDOW_MS-t)/1000));
+ res.setHeader('Retry-After',String(wait));
+ res.status(429).json({error:`Too many signing links have been requested from this address. Please wait ${Math.ceil(wait/60)} minute(s) and try again.`});
+}
+
 // The commit this instance was built from, so "is the live service the one that was
 // pushed?" is one request with no credentials: Render puts the commit in
 // RENDER_GIT_COMMIT, and tools/check_deployed.js compares it with the local HEAD.
 // Anything without that variable — a laptop running npm start — says 'local'.
-app.get('/health',(req,res)=>res.json({ok:true,service:'khusela-digital-signature',build:process.env.RENDER_GIT_COMMIT||'local',time:now()}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'khusela-digital-signature',build:process.env.RENDER_GIT_COMMIT||'local',inviteProtected:!!INVITE_KEY,time:now()}));
 
 // The client's link points at /sign/<token>, but the page behind it is one static
 // file for every token: public/sign.html reads the token out of its own path.
@@ -151,7 +225,8 @@ app.get('/health',(req,res)=>res.json({ok:true,service:'khusela-digital-signatur
 app.get('/sign/:token',(req,res)=>res.sendFile(path.join(__dirname,'public','sign.html')));
 
 // Matches the existing Khusela HTML's Generate Signing Link call.
-app.post('/api/invite',wrap(async(req,res)=>{
+app.post('/api/invite',inviteRateLimit,wrap(async(req,res)=>{
+ if(!inviteAuthorized(req)) return res.status(401).json({error:'This endpoint issues Khusela signing links to the Khusela application only'});
  try{
   const b=req.body||{};
   if(!b.clientName||!b.idNumber) return res.status(400).json({error:'clientName and idNumber are required'});
@@ -280,7 +355,7 @@ app.post('/api/sign/:token/complete',express.json({limit:'1mb'}),wrap(async(req,
   await write([
    {sql:'INSERT INTO signatures(id,invitation_id,signature_file,signature_data,signed_at,ip,user_agent) VALUES(?,?,?,?,?,?,?)',args:[id(),inv.id,'',raw,signed,req.ip,req.get('user-agent')||'']},
    {sql:"UPDATE invitations SET used_at=?,status='signed' WHERE id=? AND used_at IS NULL",args:[signed,inv.id]},
-   {sql:'INSERT INTO audit_log(invitation_id,event,created_at,ip,user_agent,meta) VALUES(?,?,?,?,?,?)',args:[inv.id,'client_signed',signed,req.ip,req.get('user-agent')||'',JSON.stringify({documents:docs})]},
+   {sql:'INSERT INTO audit_log(invitation_id,event,created_at,ip,user_agent,meta) VALUES(?,?,?,?,?,?)',args:[inv.id,'client_signed',signed,req.ip,req.get('user-agent')||'',JSON.stringify({documents:docs,xff:req.get('x-forwarded-for')||null})]},
   ]);
  }catch(e){
   if(isUniqueViolation(e)) return res.status(409).json({error:'This signing link has already been used'});

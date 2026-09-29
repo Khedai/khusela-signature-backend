@@ -95,7 +95,12 @@ npm test
   (byte-for-byte), confirm the link is burned, that two applicants stay independent,
   that an upload is recorded (while a file of the wrong type is refused as a 400 and
   an oversized one as a 413, rather than either looking like a fault on this side),
-  and that **not one file reached the host's disk**.
+  and that **not one file reached the host's disk**. It also covers who may mint a
+  link — a headerless caller from elsewhere is refused while the app's own `Origin`
+  is accepted, and the ninth request from one address is answered 429 — what the
+  audit records as the client's address (and that a caller cannot forge it by
+  writing `X-Forwarded-For` itself), and the key path on a second instance started
+  with `INVITE_API_KEY` set.
 - `tools/test_restart.js` — starts the server, captures a signature, kills the process
   the way a deploy does, then starts a second process against the same database and
   checks the signature is still there byte-for-byte, that the used signing link is
@@ -248,7 +253,10 @@ failed, and the log names the setting to check.
 
 ## Production requirements
 1. Use HTTPS.
-2. Put the Node server behind Nginx/Cloudflare or another TLS reverse proxy.
+2. Put the Node server behind Nginx/Cloudflare or another TLS reverse proxy, and
+   leave `TRUST_PROXY_HOPS` at the number of proxies in front of it (1 for Render,
+   which is the default). With the wrong value the IP stored with a signature is
+   the proxy's: on Render it was `::1`, an address that identifies nobody.
 3. Use a strong random `ADMIN_API_KEY` and keep `.env` out of source control.
 4. Back up the database. At Turso that is `turso db dump khusela > backup.sql`;
    locally it is just `storage/khusela.db`. Documents and signature images are
@@ -256,6 +264,25 @@ failed, and the log names the setting to check.
 5. For multi-server/high-volume deployment, put SQLite behind a paid Turso plan (or
    move to PostgreSQL) and keep the images in object storage.
 6. Configure `ALLOWED_ORIGINS` to the exact Khusela application domain.
+7. `POST /api/invite` is the one route with no token to check, because the
+   consultant's app calls it straight from a browser. Until that request carries a
+   secret it accepts callers that present an allowed `Origin` header (the app) or
+   that come from the server itself, and it issues at most 20 new links per address
+   per 10 minutes. The limit is real; the `Origin` rule is only a floor, since a
+   script may send any header it likes. To close it properly, send
+   `x-invite-key: <key>` from the app's invite request and set `INVITE_API_KEY` to
+   the same value — callers without it are then refused with a 401. `GET /health`
+   reports which state the service is in as `inviteProtected`.
+8. Treat `INVITE_RATE_LIMIT` as a floor, not a guarantee: those counters live in the
+   process, so a redeploy forgets them and two instances keep two sets.
 
 ## Important security design
 The raw signing token is never stored in the database; only SHA-256(token) is stored. The token expires, can only be used once, and signing records include timestamp, IP and user-agent. The backend does not expose uploaded documents through a public static route. The **manage token** (status + signature retrieval) is a separate secret that is never sent to the client, so a client's signing link cannot read a signature back.
+
+The IP recorded with a signature is the client's own rather than the host's proxy:
+`TRUST_PROXY_HOPS` makes `req.ip` the address the reverse proxy appended to
+`X-Forwarded-For`, and the raw chain is kept with the audit entry (`meta.xff`) so the
+value can be checked rather than taken on trust. Minting a link (`POST /api/invite`)
+is the one action with no token attached, because the app calls it from a browser, so
+it is limited per address and restricted to callers that look like that app or come
+from the server itself until `INVITE_API_KEY` is set and sent.
