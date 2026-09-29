@@ -1,54 +1,42 @@
 # Deploy on push.
 #
-# Render was set up without the GitHub App (no webhook), so a push here changes the
-# repository and nothing else — the running build keeps serving the old code until
-# someone tells Render to rebuild. This workflow tells it. Check the service's
-# Settings tab before relying on any of it, though: if Auto-Deploy reads "On Commit"
-# then Render is watching after all, deploys happen by themselves, and everything
-# below is only a fallback.
+# Render only rebuilds when it is told to, and this repository is not what tells it:
+# a push changes the code here while the running service keeps serving the old build.
+# This workflow calls Render.
 #
-# There are two ways to tell Render, and this workflow uses whichever is configured.
+# Look at the service's Settings tab first. If Auto-Deploy says "On Commit", Render is
+# watching this repository and deploys by itself, so none of this is needed.
 #
-#   RENDER_API_KEY + RENDER_SERVICE_ID — preferred
-#     Render's REST API: POST /v1/services/<id>/deploys. Two reasons to prefer it.
-#     The key is created and, more to the point, REVOKED at Render -> Account
-#     Settings -> API Keys, so a credential that leaks can be replaced; and the
-#     request carries commitId, so what gets built is the commit this workflow just
-#     ran on rather than whatever the branch tip has become by the time Render looks.
+# Otherwise it uses whichever credential is set:
 #
-#   RENDER_DEPLOY_HOOK — still works, but you cannot rotate it yourself
-#     The service's own secret URL: Render -> the service -> Settings -> Deploy Hook.
-#     Render's documentation says a compromised hook is replaced by clicking
-#     "Regenerate Hook" in that same section. If your dashboard does not offer that,
-#     that is a reason to move to the API key above — not a reason to go without
-#     deploys. Worth knowing before treating this as an emergency: a hook deploys the
-#     latest commit on the connected branch, and it can only deploy commits that are
-#     already in the linked repository. It is a trigger, not a way in, and it cannot
-#     read environment variables or the database, so the most a leak buys is an
-#     unnecessary rebuild.
+#   RENDER_API_KEY + RENDER_SERVICE_ID    preferred
+#     Render's REST API. You create the key, and you can delete it, under Account
+#     Settings > API Keys, so a key that leaks can be replaced. The request also names
+#     the commit to build, so Render builds the commit this run tested rather than
+#     whatever the branch tip has become by then.
 #
-# One-time setup, either line:
-#   1. Render -> Account Settings -> API Keys -> Create API Key, and the service's
-#      own ID (srv-..., in the dashboard URL) -> add both to this repository under
-#      Settings -> Secrets and variables -> Actions -> New repository secret, named
-#      RENDER_API_KEY and RENDER_SERVICE_ID.
-#   2. or Render -> the service -> Settings -> Deploy Hook -> copy the URL -> the same
-#      repository page -> secret RENDER_DEPLOY_HOOK.
-# Adding the API key while the hook secret is still set is the safe migration: the
-# API path is used as soon as it exists, and the hook can be deleted afterwards.
+#   RENDER_DEPLOY_HOOK
+#     The service's secret URL, from Settings > Deploy Hook. Render's docs mention a
+#     "Regenerate Hook" button, but not every dashboard shows one, so assume you
+#     cannot rotate it. A leaked hook can only rebuild commits that are already in
+#     this repository: no code injection, no environment variables, no database
+#     access. The worst case is a wasted build. The README has the setup steps.
 #
-# With neither secret this workflow runs, says so, and stops — it never fails a push,
-# and it never prints a credential. Secrets are passed as environment variables
-# rather than written into the command line so they stay out of the log even when the
-# command is echoed, and `set -x` is deliberately never used.
+# Adding the API key while the hook secret is still set is safe. The API path is used
+# as soon as both API values exist, so the hook can be deleted afterwards.
+#
+# With no credential set the run succeeds and says so, because a missing secret
+# should not fail a push. Secrets are passed as environment variables rather than on
+# the command line, and `set -x` is deliberately not used, so they cannot reach the
+# log.
 name: deploy
 
 on:
   push:
     branches: [main]
-  # A manual run is how to rehearse a new credential: it deploys whatever main points
-  # at now, without changing the repository, so a wrong key shows up as a failed run
-  # before the next push depends on it.
+  # "Run workflow" in the Actions tab rehearses a new credential: it deploys whatever
+  # main points at now, with no push, so a wrong key fails here instead of on the next
+  # push.
   workflow_dispatch:
 
 jobs:
@@ -63,7 +51,7 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           if [ -n "$API_KEY" ] && [ -n "$SERVICE_ID" ]; then
-            echo "Deploying $SHA through the Render API (service $SERVICE_ID)."
+            echo "Asking Render's API to deploy ${SHA} (service ${SERVICE_ID})."
             CODE=$(curl -sS -o deploy-response.json -w '%{http_code}' \
               -X POST "https://api.render.com/v1/services/${SERVICE_ID}/deploys" \
               -H "Authorization: Bearer ${API_KEY}" \
@@ -73,12 +61,11 @@ jobs:
             echo "Render answered HTTP ${CODE}."
             case "$CODE" in
               201|202)
-                echo "Render queued a build of ${SHA}."
-                echo "It builds in the background; check it with:"
+                echo "Build queued for ${SHA}. It runs in the background; check it with:"
                 echo "  npm run check:deployed -- <service URL>"
                 ;;
               401)
-                echo "::error::Render refused the API key (HTTP 401). It may have been revoked; create a new one under Account Settings > API Keys and update the RENDER_API_KEY secret."
+                echo "::error::Render rejected the API key (HTTP 401), so it may have been revoked. Create a new key under Account Settings > API Keys and update the RENDER_API_KEY secret."
                 exit 1
                 ;;
               *)
@@ -88,25 +75,25 @@ jobs:
                 ;;
             esac
           elif [ -n "$HOOK" ]; then
-            echo "Using the deploy hook: RENDER_API_KEY and RENDER_SERVICE_ID are not set."
-            echo "The hook builds the latest commit on the connected branch."
+            echo "No API key is set, so using the deploy hook. It builds the latest"
+            echo "commit on the connected branch."
             if curl -fsS -X POST "$HOOK"; then
               echo ""
-              echo "Render has been asked to deploy. It builds in the background; check"
-              echo "the service with: npm run check:deployed -- <service URL>"
+              echo "Build requested. It runs in the background; check it with:"
+              echo "  npm run check:deployed -- <service URL>"
             else
               RC=$?
-              echo "::error::The deploy hook refused the request (curl exit ${RC}). If the hook was regenerated then this secret is stale — copy the new URL from Render -> the service -> Settings -> Deploy Hook. A 404 can also mean the linked repository does not contain this commit."
+              echo "::error::The deploy hook refused the request (curl exit ${RC}). If the hook was regenerated then this secret is stale: copy the new URL from the service's Settings > Deploy Hook. A 404 can also mean the commit is not in the linked repository."
               exit 1
             fi
           else
             echo "No deploy credential is set, so there is nothing to call."
-            echo "Either Render -> Account Settings -> API Keys -> Create API Key, plus"
-            echo "the service's srv-... ID from its dashboard URL, added here under"
-            echo "Settings -> Secrets and variables -> Actions as RENDER_API_KEY and"
+            echo "Either create an API key under Account Settings > API Keys, take the"
+            echo "service's srv-... ID from its dashboard URL, and add both here under"
+            echo "Settings > Secrets and variables > Actions as RENDER_API_KEY and"
             echo "RENDER_SERVICE_ID,"
-            echo "or Render -> the service -> Settings -> Deploy Hook -> copy the URL and"
-            echo "add it here as RENDER_DEPLOY_HOOK."
+            echo "or copy the URL from the service's Settings > Deploy Hook and add it"
+            echo "here as RENDER_DEPLOY_HOOK."
             echo "If the service's Settings show Auto-Deploy as On Commit, Render deploys"
             echo "by itself and none of this is needed."
             exit 0

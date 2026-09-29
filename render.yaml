@@ -71,24 +71,22 @@ services:
       # of INVITE_RATE_LIMIT (20 per address per 10 minutes).
       #
       # TRUST_PROXY_HOPS is how many proxies append to X-Forwarded-For before this
-      # process sees the request, and it has to be the real number: too few and the
+      # process sees the request, and it has to be the real number. Too few and the
       # recorded IP is an address inside Render (a signature from a real phone named
-      # "::1" before this existed), too many and a caller could name itself. Measured
-      # on 2026-09-29 from real signing requests, the chain was
+      # "::1" before this existed); too many and a caller could name itself.
+      # Measured on 2026-09-29 from real signing requests, the chain was
       #   165.0.11.224, 172.68.247.29, 10.24.207.248
-      # — the client, Render's edge, Render's internal hop — three appends, so three.
-      # Only the count matters: the last entry differs from request to request
-      # (10.29.92.62 and 10.29.109.133 on two other attempts), and the server keeps
-      # the whole chain in the audit entry (meta.xff) so that a recorded address can
-      # be checked rather than trusted.
+      # the client, Render's edge and Render's internal hop, so three appends.
+      # Only the number matters: the last entry differs from request to request
+      # (10.29.92.62 and 10.29.109.133 on two other attempts). The server keeps the
+      # whole chain in the audit entry (meta.xff), so a recorded address can be
+      # checked rather than trusted.
       #
-      # The server works this out by itself too: a Render service publishes
-      # RENDER_SERVICE_ID, and the code uses 3 appends when it sees that, 1 anywhere
-      # else. This value is the belt to that braces, and it only takes effect on a
-      # Blueprint sync — Render does not push blueprint env changes into a service
-      # that already exists, so the code default is what actually governs a service
-      # created before this line was added. Re-measure with the live harness if
-      # Render's edge ever changes.
+      # The code works this out by itself: it uses 3 when RENDER_SERVICE_ID is set,
+      # and 1 anywhere else. This value only takes effect on a Blueprint sync, and
+      # Render does not push blueprint env changes into a service that already exists,
+      # so the code default is what governs a service created before this line was
+      # added. Re-measure with the live harness if Render's edge changes.
       - key: TRUST_PROXY_HOPS
         value: "3"
       # Render generates a strong secret. Read it under the service's Environment

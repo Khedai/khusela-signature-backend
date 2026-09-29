@@ -192,33 +192,28 @@ to be pointed at the repository.
 5. Copy that URL into `khusela-itc-pwa/js/config.js` as `signatureApiBase`
    (see the PWA section above), commit it, and let Vercel redeploy.
 
-**Deploying a change later.** Render only rebuilds when it is told to, and there are
-two ways to tell it. Both are wired up in `.github/workflows/deploy.yml`, which uses
-whichever is configured and says so when neither is:
+**Deploying a change later.** Render only rebuilds when it is told to, and
+`.github/workflows/deploy.yml` is what tells it. That workflow uses whichever
+credential is set, and if neither is set it says so without failing the build:
 
-- **Render's API — the one to use.** Create a key at Render → **Account Settings →
-  API Keys**, add it to this repository as the `RENDER_API_KEY` secret together with
-  `RENDER_SERVICE_ID` (the service's `srv-...` ID, which is in its dashboard URL),
-  and every push to `main` triggers a deploy. The key can be revoked and replaced on
-  that same Account Settings page, which is the point of preferring it, and the
-  request names the exact commit (`commitId`), so what is built is the commit the
-  workflow ran on rather than whatever the branch tip has become by the time Render
-  looks.
-- **The service's Deploy Hook** (Settings → Deploy Hook, kept here as the
-  `RENDER_DEPLOY_HOOK` secret). Still supported, because it needs no API key, but
-  Render's documentation describes replacing a compromised hook with **Regenerate
-  Hook** in that same section — if your dashboard does not show that control, prefer
-  the API key instead of losing the ability to rotate a credential. Worth knowing
-  before treating a leaked hook as an emergency: the hook deploys the latest commit
-  on the connected branch, and it can only deploy commits that are already in this
-  repository, so it is a trigger rather than a way in. The worst it allows is an
-  unnecessary rebuild.
+- **Render's API — use this one.** Create a key at Render → **Account Settings → API
+  Keys**. Add it to this repository as the `RENDER_API_KEY` secret, along with
+  `RENDER_SERVICE_ID` (the service's `srv-...` ID, in its dashboard URL). Every push
+  to `main` then deploys. You can delete and replace the key on that same page, which
+  is why it is the one to use, and the request names the commit (`commitId`), so
+  Render builds the commit the workflow ran on and not a later push to the branch.
+- **The service's Deploy Hook** (Settings → Deploy Hook, stored here as the
+  `RENDER_DEPLOY_HOOK` secret). Still supported, because it needs no API key.
+  Render's docs say a compromised hook is replaced with **Regenerate Hook** in that
+  section; if your dashboard has no such control, use the API key rather than keep a
+  credential you cannot rotate. A leaked hook is not urgent either way: it can only
+  rebuild commits that are already in this repository, so it is a trigger, not a way
+  in.
 
-Adding `RENDER_API_KEY` while the hook secret is still set is the safe migration —
-the API path is used as soon as it exists, so the hook can be deleted afterwards. And
-check the service's Settings first: if **Auto-Deploy** reads *On Commit*, Render is
-watching the repository and deploys by itself, which makes both credentials
-unnecessary and a leaked hook harmless.
+Set the API key before deleting the hook secret — the API path is used as soon as it
+exists, so deploys never stop. Either way, look at the service's Settings first: if
+**Auto-Deploy** reads *On Commit*, Render deploys by itself and neither credential is
+needed.
 
 To tell whether the running build is the one you pushed:
 
