@@ -4,7 +4,7 @@ Production-oriented Node.js/Express backend for the Khusela application.
 
 ## What it provides
 - `POST /api/invite` — creates a random, expiring, one-time signing link. Returns the link plus a **manage token** (see below). Accepts `signerLabel` (e.g. `Applicant 1`) and `applicationRef` so one application can have several signatories.
-- `GET /sign/:token` — the signing page the client opens, i.e. the link `POST /api/invite` returns. One static file serves every token (it reads the token out of its own path); an unknown, expired or already-used link is reported by the page itself. This page is the only thing the client ever sees — there is nothing to log into.
+- `GET /sign/:token` — the signing page the client opens, i.e. the link `POST /api/invite` returns. One static file serves every token (it reads the token out of its own path); an unknown, expired or already-used link is reported by the page itself. This page is the only thing the client ever sees — there is nothing to log into. The page's code is the separate same-origin file `public/sign.js`: helmet's default Content-Security-Policy here is `script-src 'self'`, so an inline `<script>` is refused by the browser and the client would sit on "Loading your secure signing session…" for ever.
 - `GET /api/sign/:token` — validates the secure link and returns only the client-facing data needed by the signing page.
 - `POST /api/sign/:token/upload` — accepts ID, payslip and bank-statement files (PDF/JPG/PNG).
 - `POST /api/sign/:token/complete` — stores the drawn signature, timestamp, IP and user-agent and permanently consumes the link.
@@ -75,8 +75,11 @@ signature appears in that applicant's box and in the PDF the PWA e-mails.
 npm test
 ```
 - `tools/test_signature_flow.js` — end-to-end: create a request, fetch the link the
-  client receives (it has to serve the signing page itself, not a 404), load the signing
-  page data, poll the status, sign **without** documents, fetch the signature image
+  client receives (it has to serve the signing page itself, not a 404), and check that
+  page can actually **run** in a browser — no inline `<script>` for the CSP to refuse,
+  its script loaded by an absolute path and parsed the way V8 parses it, since the page
+  once rendered and did nothing at all. Then load the signing page data, poll the
+  status, sign **without** documents, fetch the signature image
   (byte-for-byte), confirm the link is burned, that two applicants stay independent,
   that an upload is recorded (while a file of the wrong type is refused as a 400 and
   an oversized one as a 413, rather than either looking like a fault on this side),

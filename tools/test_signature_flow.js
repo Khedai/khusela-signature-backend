@@ -76,6 +76,29 @@ try {
   const pageHtml = await pageRes.text();
   check('the signing link serves the signing page', pageRes.status === 200 && pageHtml.includes('Khusela Secure Digital Signature'), 'HTTP ' + pageRes.status);
 
+  // The page must actually RUN in a browser. Two separate faults once made it
+  // render and do nothing: the script was inline while server.js sends helmet's
+  // default CSP (script-src 'self', which refuses inline scripts), and that
+  // script was itself invalid — load() declared `const r` and also `var r`, and
+  // const and var share a function's scope, which V8 rejects as an early
+  // SyntaxError. Either fault alone leaves the client staring at "Loading your
+  // secure signing session…" for ever, so both are checked here.
+  const scriptTags = pageHtml.match(/<script\b[^>]*>/gi) || [];
+  const inlineTags = scriptTags.filter((tag) => !/\bsrc=/i.test(tag));
+  check('the page carries no inline <script> (the CSP would refuse it)',
+    inlineTags.length === 0, inlineTags.join(' ') || 'none');
+  const srcMatch = pageHtml.match(/<script\b[^>]*\bsrc="([^"]+)"/i);
+  check('the page loads its script by an absolute path, not one relative to /sign/<token>',
+    !!srcMatch && srcMatch[1].startsWith('/'), srcMatch ? srcMatch[1] : 'no src attribute');
+  const scriptRes = await fetch(BASE + srcMatch[1]);
+  const scriptSrc = await scriptRes.text();
+  check('that script is served', scriptRes.status === 200, 'HTTP ' + scriptRes.status);
+  let parseError = null;
+  try { new Function(scriptSrc); } catch (e) { parseError = e.message; }
+  check('that script is valid JavaScript the browser will parse (V8)', !parseError, parseError || 'parses');
+  check('it reads the token out of the path and posts the signature to /complete',
+    scriptSrc.includes('location.pathname') && scriptSrc.includes('/complete'));
+
   const sign = await (await fetch(BASE + '/api/sign/' + token)).json();
   check('signerLabel echoed to the signing page', sign.signerLabel === 'Applicant 1', JSON.stringify(sign));
   check('documents not required for a signature-only request', sign.requireDocuments === false);
