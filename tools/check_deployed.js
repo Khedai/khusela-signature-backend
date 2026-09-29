@@ -1,15 +1,20 @@
 // Is the deployed service running the code in this repository?
 //
 // Deploying this server is the one step that no test here can do: Render has to
-// be told, and a push to the repository does not tell it (there is no Deploy
-// Hook and no GitHub App webhook on the service, so `git push` changes nothing
-// that is live). That left a gap this file closes: after a deploy, or when a
-// link misbehaves in a client's hands, there was no way to ask "is the running
-// build the one I pushed?" without a browser and a signing link.
+// be told, and this repository is not what tells it. The service does not watch
+// the repository, so a push reaches it only because .github/workflows/deploy.yml
+// calls the service's Deploy Hook — and when that call fails, or the secret it
+// needs is missing, `git push` changes nothing that is live. That left a gap this
+// file closes: after a deploy, or when a link misbehaves in a client's hands,
+// there was no way to ask "is the running build the one I pushed?" without a
+// browser and a signing link.
 //
 // It asks with reads only — no credentials, no database rows, nothing written —
 // and it checks the things that only a browser could see when they were wrong:
 //   * the service answers at all (/health),
+//   * the build it reports is the commit in this working copy (which is the
+//     difference between a deploy having happened and a push having done
+//     nothing),
 //   * the signing page carries no inline <script> (the CSP refuses those, so the
 //     client would stare at "Loading your secure signing session…" for ever),
 //   * the script it points at is served, is valid JavaScript, and measures the
@@ -23,6 +28,8 @@
 //   node tools/check_deployed.js                      # PUBLIC_BASE_URL / RENDER_EXTERNAL_URL / localhost:3000
 //   node tools/check_deployed.js https://host.example # say which service to ask
 // Exit code is 0 only when every check passes, so it can gate a deploy.
+import { execSync } from 'child_process';
+
 const BASE = (process.argv[2] || process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL
   || 'http://localhost:3000').replace(/\/$/, '');
 const ORIGIN = new URL(BASE).origin;
@@ -33,6 +40,16 @@ function check(name, ok, extra) {
   else { fail++; console.log('  FAIL ' + name + (extra ? ' -- ' + extra : '')); }
 }
 const oneLine = (s) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+
+// Which commit is this working copy on? A copy without git (a downloaded zip, a
+// container without it) cannot answer, and a check that cannot be asked is
+// skipped rather than failed — the verdict is about the service, not about
+// whether this machine has git installed.
+let localSha = null;
+try {
+  localSha = execSync('git rev-parse HEAD', { cwd: import.meta.dirname, stdio: ['ignore', 'pipe', 'ignore'] })
+    .toString().trim() || null;
+} catch (e) { localSha = null; }
 
 (async () => {
   console.log('Asking ' + BASE + ' what it is running\n');
@@ -47,7 +64,27 @@ const oneLine = (s) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, 120)
     health.status === 200 && health.body && health.body.ok === true,
     health.status + ' ' + (health.error || JSON.stringify(health.body)));
 
-  // 2. The signing page is the external-script one.
+  // 3. The build it reports is the commit in this working copy. This is the check
+  // that says whether a push reached the service at all: a service deployed before
+  // this field existed reports no build at all, and one deployed from another
+  // commit reports that other commit. Two situations cannot be asked and are
+  // skipped rather than failed — no git here to name a commit, and a service that
+  // was never built by Render (it reports 'local'), which is what a laptop running
+  // `npm start` answers.
+  const build = health.body ? health.body.build : null;
+  if (!localSha) {
+    console.log('  --   the running build is this commit (skipped: no git here to name the commit)');
+  } else if (build === 'local') {
+    console.log('  --   the running build is this commit (skipped: ' + BASE + ' was not built by Render,'
+      + ' so there is no deployed build to compare with)');
+  } else {
+    check('the running build is this commit (' + localSha.slice(0, 7) + ')',
+      build === localSha,
+      build ? 'the service reports ' + String(build).slice(0, 7)
+        : 'nothing in /health: the running build predates this field, so it was deployed before this check existed');
+  }
+
+  // 4. The signing page is the external-script one.
   const pageRes = await fetch(BASE + '/sign/check-deployed');
   const page = await pageRes.text();
   const inlineTags = (page.match(/<script\b[^>]*>/gi) || []).filter((t) => !/\bsrc=/i.test(t));
@@ -59,7 +96,7 @@ const oneLine = (s) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, 120)
   check('it loads its script by an absolute path', !!srcMatch && srcMatch[1].startsWith('/'),
     srcMatch ? srcMatch[1] : 'no src attribute');
 
-  // 3. That script, as this service serves it.
+  // 5. That script, as this service serves it.
   let script = '', scriptStatus = 0;
   if (srcMatch) {
     const res = await fetch(BASE + srcMatch[1]);
@@ -74,7 +111,7 @@ const oneLine = (s) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, 120)
   check('the pad is measured again once the form is on screen',
     /hidden\s*=\s*false\s*;\s*size\(\)/.test(script), oneLine(script) || 'no script to read');
 
-  // 4. The origin rule the client's own page depends on.
+  // 6. The origin rule the client's own page depends on.
   let own = { status: 0, body: '' };
   try {
     const res = await fetch(BASE + '/api/sign/check-deployed/complete', {
@@ -88,7 +125,8 @@ const oneLine = (s) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, 120)
   console.log('');
   if (fail) {
     console.log(fail + ' of ' + (pass + fail) + ' checks failed: this service is NOT running the code in this repository (or is misconfigured).');
-    console.log('Deploy it — Render dashboard, the service, "Deploy latest commit" — then run this again.');
+    console.log('Deploy it — push to main, which makes the deploy workflow call the Deploy Hook, or press');
+    console.log('"Deploy latest commit" on the service in the Render dashboard — then run this again.');
   } else {
     console.log('All ' + pass + ' checks passed: the deployed service matches this repository.');
   }

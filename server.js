@@ -136,7 +136,11 @@ function requireAdmin(req,res,next){
  next();
 }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'khusela-digital-signature',time:now()}));
+// The commit this instance was built from, so "is the live service the one that was
+// pushed?" is one request with no credentials: Render puts the commit in
+// RENDER_GIT_COMMIT, and tools/check_deployed.js compares it with the local HEAD.
+// Anything without that variable — a laptop running npm start — says 'local'.
+app.get('/health',(req,res)=>res.json({ok:true,service:'khusela-digital-signature',build:process.env.RENDER_GIT_COMMIT||'local',time:now()}));
 
 // The client's link points at /sign/<token>, but the page behind it is one static
 // file for every token: public/sign.html reads the token out of its own path.

@@ -197,6 +197,9 @@ npm run check:deployed -- https://khusela-signature-backend.onrender.com
 ```
 
 It reads only, needs no credentials, and exits non-zero while the service is stale.
+The last check is the commit itself: `/health` reports the commit Render built the
+instance from, and the check compares that with `git rev-parse HEAD` here, so "is the
+thing you pushed the thing that is live?" has a yes or no answer.
 
 **Why no disk is needed.** Every byte that matters — the invitations, the uploaded
 documents and the signature images — is a row in the Turso database, so Render's
