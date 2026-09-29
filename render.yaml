@@ -68,9 +68,20 @@ services:
       # PWA has to send it first or its "Send Signing Link" button stops working.
       # Until it is set, /health reports inviteProtected:false and the route
       # accepts only callers with an allowed Origin (the PWA) or a local one, on top
-      # of INVITE_RATE_LIMIT (20 per address per 10 minutes). TRUST_PROXY_HOPS is 1
-      # because Render's proxy is the only hop in front of this service, which is
-      # what makes the IP recorded with a signature the client's and not "::1".
+      # of INVITE_RATE_LIMIT (20 per address per 10 minutes).
+      #
+      # TRUST_PROXY_HOPS is how many proxies append to X-Forwarded-For before this
+      # process sees the request, and it has to be the real number: too few and the
+      # recorded IP is an address inside Render (a signature from a real phone named
+      # "::1" before this existed), too many and a caller could name itself. Measured
+      # on 2026-09-29 from a real signing request, the chain was
+      #   165.0.11.224, 172.68.247.29, 10.29.92.62
+      # which is the client, then Render's edge, then Render's internal hop: three
+      # appends, so three. Re-measure with tools/check_deployed.js (it refuses a
+      # headerless invite) or with the mobile harness if Render's edge changes, and
+      # change this number to match.
+      - key: TRUST_PROXY_HOPS
+        value: "3"
       # Render generates a strong secret. Read it under the service's Environment
       # tab if you ever need to call the /api/admin/* endpoints.
       - key: ADMIN_API_KEY
