@@ -10,6 +10,12 @@ Production-oriented Node.js/Express backend for the Khusela application.
 - `POST /api/sign/:token/complete` — stores the drawn signature, timestamp, IP and user-agent and permanently consumes the link.
 - `GET /api/manage/:manageToken` — the consultant-side status of a signing request (`pending` / `signed` / `expired`), plus the signature URL when signed.
 - `GET /api/manage/:manageToken/signature` — the captured signature as a PNG.
+- `POST /api/email` — takes the finished application PDF from the PWA and mails it
+  to the office (`MAIL_TO`) from the service's own mailbox. The recipient is owned
+  by the server, so no caller can name one, which is what makes a route the browser
+  calls safe to expose. It answers **503 `email_not_configured`** while the mailbox
+  is unset, which is the signal the PWA uses to fall back to its old path — see
+  "Emailing the finished application" below.
 - Admin endpoints protected by `x-admin-key` for invitation/document/signature/audit status.
 - SQLite through the libSQL/Turso client, with **everything** in the database: the
   invitations, the audit log, the uploaded documents and the signature images
@@ -82,6 +88,44 @@ window can be closed, wipes the signature pad and switches both buttons off. A
 client who leaves the tab open therefore cannot sign a second time that would
 never be sent, nor mistake a signed pad for a form that still has to go.
 
+## Emailing the finished application
+
+The PWA renders the application to a PDF and hands it to the backend, which mails
+it to the office. `mailer.js` holds the whole arrangement and `server.js` only
+guards the route.
+
+This replaced a third-party form-to-email service (FormSubmit) that the PWA posted
+the PDF to directly. On 2026-09-30 that service answered every submission with a
+500 — including its own documentation page — while the PWA, which posted through a
+hidden iframe, could not see the status and so reported success. A PDF does arrive
+now or the app says so.
+
+```http
+POST /api/email            multipart/form-data
+  attachment   the PDF (required, at most MAX_EMAIL_MB)
+  applicant    name shown in the subject and body
+  idNumber     shown in the body, so the mail can be filed
+  date         the date shown on the application
+  replyTo      the consultant's address for Reply-To, if there is one
+```
+
+`200` returns `{ ok, id, accepted, rejected }`; `502` means the mail server refused
+and the app reports a failure; `503 email_not_configured` means no mailbox is set
+up here and the app should use its fallback. The recipient comes from `MAIL_TO`
+alone: an `applicant`/`to` field in the request can never redirect the mail, caller
+supplied strings are stripped of newlines and capped in length (so they cannot
+inject SMTP headers or pad the message), and `replyTo` only ever becomes a
+`Reply-To:` header. This is a route the browser calls, so it is rate limited per
+address (20 per 10 minutes; `EMAIL_RATE_LIMIT`, `EMAIL_RATE_WINDOW_MS`) and accepts
+only callers with an allowed `Origin` or from this machine until `EMAIL_API_KEY` is
+set and sent as `x-email-key` / `Authorization: Bearer`. `GET /health` reports the
+state as `emailConfigured` and `emailProtected`.
+
+Setting it up is five variables (`MAIL_TO`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`,
+`SMTP_PASS`; Gmail wants an **app password**, not the account password) — see
+`.env.example` and `render.yaml`. Leaving them unset is a supported state, not a
+broken one: `npm test` exercises the 503 path on purpose.
+
 ## Tests
 ```bash
 npm test
@@ -110,8 +154,17 @@ npm test
   previous version and checks the new columns (`manage_token_hash`, `signer_label`,
   `application_ref`, `signature_data`, the `documents.content` table) are added
   without touching existing invitations.
+- `tools/test_email_route.js` — runs the whole `/api/email` route against a **fake
+  SMTP server in this process**, so the suite needs no mailbox and no network and
+  still sees what a real mail server would: a caller with no key is refused, a
+  missing attachment or a non-PDF is a 400, an oversized one is a 413, the delivery
+  reaches exactly one recipient and it is the office address even when the request
+  tries to name another, the applicant and ID number appear in the subject and body,
+  the office can reply to the applicant, the PDF arrives as an attachment with the
+  bytes that were sent, a second request inside the window is a 429, and a service
+  started without a mailbox answers 503 and says so at startup.
 
-All three run on a scratch database in `storage/` and clean up after themselves.
+All four run on a scratch database in `storage/` and clean up after themselves.
 
 `npm test` never touches a deployment. To ask a **deployed** service whether it is
 running this repository's code — reads only, no credentials, non-zero exit while it
@@ -297,6 +350,15 @@ failed, and the log names the setting to check.
    reports which state the service is in as `inviteProtected`.
 8. Treat `INVITE_RATE_LIMIT` as a floor, not a guarantee: those counters live in the
    process, so a redeploy forgets them and two instances keep two sets.
+9. `POST /api/email` is the second route the browser calls directly, so it is held
+   the same way: `MAIL_TO` (not the request) decides the recipient, the caller's
+   text is stripped and capped before it reaches a header, uploads are limited to
+   `MAX_EMAIL_MB`, callers are rate limited per address, and until
+   `EMAIL_API_KEY` is set and sent the route accepts only an allowed `Origin` or a
+   local caller. `SMTP_PASS` is a Gmail **app password** (2-step verification must
+   be on) and belongs in the host's environment, never in this repository. Leaving
+   the mailbox unconfigured does not expose anything: the route answers 503 and the
+   PWA falls back.
 
 ## Important security design
 The raw signing token is never stored in the database; only SHA-256(token) is stored. The token expires, can only be used once, and signing records include timestamp, IP and user-agent. The backend does not expose uploaded documents through a public static route. The **manage token** (status + signature retrieval) is a separate secret that is never sent to the client, so a client's signing link cannot read a signature back.

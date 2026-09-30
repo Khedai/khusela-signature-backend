@@ -15,6 +15,12 @@ const DB = path.join(ROOT, 'storage', '_e2e_test.db');
 const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
 const PNG_BYTES = Buffer.from(PNG.split(',')[1], 'base64');
 const PDF = Buffer.from('%PDF-1.4 test document');
+// The storage folder is not in git — only the databases inside it are ignored —
+// and db.js creates it only for its own default path, so a fresh checkout has
+// nowhere for a scratch database to live. Make it before a server is pointed at
+// one. (This suite passed for years on a machine where the folder already
+// existed; a clone did not.)
+fs.mkdirSync(path.dirname(DB), { recursive: true });
 
 for (const f of [DB, DB + '-wal', DB + '-shm']) { try { fs.rmSync(f, { force: true }); } catch (e) {} }
 

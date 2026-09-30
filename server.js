@@ -7,6 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import 'dotenv/config';
 import { DB_URL, USING_REMOTE_DB, all, get, run, write, ddl, isUniqueViolation } from './db.js';
+import { mailConfigured, sendApplication, MAX_EMAIL_BYTES } from './mailer.js';
 
 const __dirname=path.dirname(fileURLToPath(import.meta.url));
 const PORT=Number(process.env.PORT||3000);
@@ -223,7 +224,7 @@ function inviteRateLimit(req,res,next){
 // pushed?" is one request with no credentials: Render puts the commit in
 // RENDER_GIT_COMMIT, and tools/check_deployed.js compares it with the local HEAD.
 // Anything without that variable — a laptop running npm start — says 'local'.
-app.get('/health',(req,res)=>res.json({ok:true,service:'khusela-digital-signature',build:process.env.RENDER_GIT_COMMIT||'local',inviteProtected:!!INVITE_KEY,time:now()}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'khusela-digital-signature',build:process.env.RENDER_GIT_COMMIT||'local',inviteProtected:!!INVITE_KEY,emailConfigured:mailConfigured(),emailProtected:!!process.env.EMAIL_API_KEY,time:now()}));
 
 // The client's link points at /sign/<token>, but the page behind it is one static
 // file for every token: public/sign.html reads the token out of its own path.
@@ -254,6 +255,100 @@ app.post('/api/invite',inviteRateLimit,wrap(async(req,res)=>{
   const signingLink=`${BASE}/sign/${token}`;
   res.json({ok:true,invitationId:inviteId,signingLink,manageToken,signerLabel,expiresAt:expires});
  }catch(e){console.error(e);res.status(500).json({error:'Could not generate secure signing link'});}
+}));
+
+// ── Emailing the finished application ────────────────────────────────────────
+// The PWA posts the PDF it has just rendered here and this service mails it to
+// the office mailbox (MAIL_TO) through the mailbox in mailer.js. Why that exists
+// instead of the app posting to a form-to-email service is in that file's
+// header; the short version is that FormSubmit answered every submission with a
+// 500, and an app that cannot see a real status cannot tell anyone.
+//
+// The gate is the same shape as /api/invite's — called from a browser, so there
+// is no session to check — with one difference that matters: the RECIPIENT is
+// never taken from the request. The caller supplies the PDF and the applicant's
+// details; where the mail goes is this service's own setting, so a copied URL
+// cannot be used to send mail to strangers. EMAIL_API_KEY, when set, is a real
+// secret (x-email-key, or a bearer token) and nothing else counts; while it is
+// unset a caller that looks like the app (an allowed Origin) or that comes from
+// this machine is accepted. /health reports both states, as emailConfigured and
+// emailProtected, so neither is a guess.
+const EMAIL_KEY=process.env.EMAIL_API_KEY||'';
+if(!mailConfigured()) console.warn('WARNING: no mailbox is configured (MAIL_TO, SMTP_USER, SMTP_PASS), so POST /api/email answers 503 and the app keeps using its own email service. Set them to send applications from this service.');
+function presentedEmailKey(req){
+ const header=req.get('x-email-key');
+ if(header) return header;
+ const bearer=/^Bearer\s+(.+)$/i.exec(req.get('authorization')||'');
+ return bearer?bearer[1]:'';
+}
+function emailAuthorized(req){
+ if(EMAIL_KEY) return sameSecret(presentedEmailKey(req),EMAIL_KEY);
+ const origin=req.get('origin');
+ return (!!origin&&originAllowed(origin))||isLocalAddress(req.ip);
+}
+// An application is a few MB and a real message to a real mailbox, so it is
+// limited per address as well: 20 in 10 minutes by default, EMAIL_RATE_LIMIT=0
+// switches it off. The counters live in this process, so a redeploy forgets them.
+const EMAIL_LIMIT=Math.max(0,Number(process.env.EMAIL_RATE_LIMIT??20));
+const EMAIL_WINDOW_MS=Math.max(1000,Number(process.env.EMAIL_RATE_WINDOW_MS||600000));
+const emailHits=new Map();
+if(EMAIL_LIMIT) setInterval(()=>{const t=Date.now();for(const[k,e] of emailHits) if(t-e.start>=EMAIL_WINDOW_MS) emailHits.delete(k);},EMAIL_WINDOW_MS).unref();
+function emailRateLimit(req,res,next){
+ if(!EMAIL_LIMIT) return next();
+ const who=String(req.ip||'unknown'); const t=Date.now();
+ let e=emailHits.get(who);
+ if(!e||t-e.start>=EMAIL_WINDOW_MS){e={start:t,n:0};emailHits.set(who,e);}
+ e.n++;
+ if(e.n<=EMAIL_LIMIT) return next();
+ const wait=Math.max(1,Math.ceil((e.start+EMAIL_WINDOW_MS-t)/1000));
+ res.setHeader('Retry-After',String(wait));
+ res.status(429).json({error:`Too many applications have been emailed from this address. Please wait ${Math.ceil(wait/60)} minute(s) and try again.`});
+}
+// The gate runs BEFORE multer, so a caller with no right to be here — or a
+// service with no mailbox configured yet — is answered without this process
+// buffering 20 MB of PDF it is never going to use.
+function emailGate(req,res,next){
+ if(!emailAuthorized(req)) return res.status(401).json({error:'This endpoint emails Khusela applications to the Khusela office only'});
+ if(!mailConfigured()) return res.status(503).json({error:'email_not_configured',message:'This service has no mailbox configured yet, so the application was not emailed. Try again once the office mailbox has been set up on it.'});
+ next();
+}
+// One PDF and nothing else: that is what this route exists to carry.
+const emailUpload=multer({
+ storage:multer.memoryStorage(),
+ limits:{fileSize:MAX_EMAIL_BYTES,files:1},
+ fileFilter:(req,file,cb)=>{
+  if(file.mimetype==='application/pdf') return cb(null,true);
+  const bad=new Error('The application has to be sent as a PDF'); bad.status=400; cb(bad);
+ },
+});
+
+app.post('/api/email',emailRateLimit,emailGate,emailUpload.single('attachment'),wrap(async(req,res)=>{
+ const file=req.file;
+ if(!file) return res.status(400).json({error:'The application PDF is missing from the request'});
+ const b=req.body||{};
+ try{
+  const out=await sendApplication({
+   filename:file.originalname,
+   pdf:file.buffer,
+   applicant:b.applicant,
+   idNumber:b.idNumber,
+   date:b.date,
+   replyTo:b.replyTo,
+  });
+  // One line per application that went out, so the log answers "did it arrive?"
+  // without a mailbox. The applicant's own address is deliberately not in it —
+  // the message headers carry that and this log is not the place for it.
+  console.log(`Application emailed (${(file.size/1048576).toFixed(1)} MB, message ${out.messageId||'?'}, accepted by ${out.accepted.join(', ')||'nobody'})`);
+  res.json({ok:true,messageId:out.messageId,accepted:out.accepted.length>0});
+ }catch(e){
+  // The mailbox refused the message or could not be reached. That is neither the
+  // caller's mistake nor a fault in this process, so it is a 502 carrying the
+  // reason: a consultant needs to know the application did not go, and that
+  // retrying is worth it. A wrong password shows up here, which is the whole
+  // point of testing it before the office depends on it.
+  console.error('email send failed: '+(e&&e.message?e.message:e));
+  res.status(502).json({error:'The application could not be emailed: '+((e&&e.message)||'the mail server refused it')});
+ }
 }));
 
 async function getInvite(token){

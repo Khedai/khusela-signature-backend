@@ -16,6 +16,10 @@ const DB = path.join(ROOT, 'storage', '_mig_test.db');
 const DB_URL = 'file:./storage/_mig_test.db';
 
 for (const f of [DB, DB + '-wal', DB + '-shm']) { try { fs.rmSync(f, { force: true }); } catch (e) {} }
+// The folder is not in git — only the databases inside it are ignored — and db.js
+// creates it only for its own default path, so a fresh checkout has nowhere for a
+// scratch database to live.
+fs.mkdirSync(path.dirname(DB), { recursive: true });
 
 // Build the database exactly as the previous version of server.js left it: no
 // manage_token_hash / signer_label / application_ref, no documents table, and

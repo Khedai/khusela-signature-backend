@@ -27,6 +27,10 @@ const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJA
 const PNG_BYTES = Buffer.from(PNG.split(',')[1], 'base64');
 
 if (!process.env.E2E_DB_URL) {
+  // The storage folder is not in git — only the databases inside it are ignored
+  // — and db.js creates it only for its own default path, so a fresh checkout has
+  // nowhere for a scratch database to live.
+  fs.mkdirSync(path.dirname(LOCAL_DB), { recursive: true });
   for (const f of [LOCAL_DB, LOCAL_DB + '-wal', LOCAL_DB + '-shm']) {
     try { fs.rmSync(f, { force: true }); } catch (e) {}
   }

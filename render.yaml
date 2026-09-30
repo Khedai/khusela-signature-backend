@@ -93,3 +93,33 @@ services:
       # tab if you ever need to call the /api/admin/* endpoints.
       - key: ADMIN_API_KEY
         generateValue: true
+      # ── Emailing the finished application ──────────────────────────────────
+      # POST /api/email mails the PDF the PWA renders to MAIL_TO, from this
+      # service's own mailbox, instead of the PWA handing it to a third-party
+      # form-to-email service (see mailer.js for why that had to stop).
+      #
+      # IMPORTANT: Render applies these to a service it creates from this
+      # blueprint. It does NOT push a blueprint change into a service that already
+      # exists — an existing service needs the same keys added by hand in
+      # Dashboard > Environment. The server says which state it is in:
+      # /health reports emailConfigured:true once MAIL_TO, SMTP_USER and SMTP_PASS
+      # are all set.
+      - key: MAIL_TO
+        value: khuselamanagement@gmail.com
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: "465"
+      - key: SMTP_USER
+        value: khuselamanagement@gmail.com
+      # The Gmail APP PASSWORD (16 characters, no spaces), not the account
+      # password: Google refuses the account password for SMTP and only offers an
+      # app password once 2-step verification is on. Render prompts for this one
+      # rather than storing it in this repository.
+      - key: SMTP_PASS
+        sync: false
+      # MAIL_TO is the only address this service will ever send to: the app cannot
+      # name a recipient, so a copied URL cannot be used to mail strangers. The
+      # sender is left at its default (the authenticated account).
+      - key: MAX_EMAIL_MB
+        value: "20"
