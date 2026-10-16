@@ -98,28 +98,34 @@ services:
       # service's own mailbox, instead of the PWA handing it to a third-party
       # form-to-email service (see mailer.js for why that had to stop).
       #
+      # ONLY set the mailbox variables below where outbound SMTP actually works.
+      # The free tier of Render blocks ports 25, 465 and 587, so a send from a
+      # free instance times out and answers 502 — which the app does NOT fall back
+      # from, because 502 also covers real faults such as an oversized PDF. With
+      # these unset, the route answers 503 email_not_configured and the app falls
+      # back to the old path, which is what a free service should do. /health
+      # says which state you are in as emailConfigured.
+      #
       # IMPORTANT: Render applies these to a service it creates from this
       # blueprint. It does NOT push a blueprint change into a service that already
       # exists — an existing service needs the same keys added by hand in
-      # Dashboard > Environment. The server says which state it is in:
-      # /health reports emailConfigured:true once MAIL_TO, SMTP_USER and SMTP_PASS
-      # are all set.
-      - key: MAIL_TO
-        value: khuselamanagement@gmail.com
-      - key: SMTP_HOST
-        value: smtp.gmail.com
-      - key: SMTP_PORT
-        value: "465"
-      - key: SMTP_USER
-        value: khuselamanagement@gmail.com
+      # Dashboard > Environment.
+      # - key: MAIL_TO
+      #   value: khuselamanagement@gmail.com
+      # - key: SMTP_HOST
+      #   value: smtp.gmail.com
+      # - key: SMTP_PORT
+      #   value: "465"
+      # - key: SMTP_USER
+      #   value: khuselamanagement@gmail.com
       # The Gmail APP PASSWORD (16 characters, no spaces), not the account
       # password: Google refuses the account password for SMTP and only offers an
       # app password once 2-step verification is on. Render prompts for this one
       # rather than storing it in this repository.
-      - key: SMTP_PASS
-        sync: false
+      # - key: SMTP_PASS
+      #   sync: false
       # MAIL_TO is the only address this service will ever send to: the app cannot
       # name a recipient, so a copied URL cannot be used to mail strangers. The
       # sender is left at its default (the authenticated account).
-      - key: MAX_EMAIL_MB
-        value: "20"
+      # - key: MAX_EMAIL_MB
+      #   value: "20"

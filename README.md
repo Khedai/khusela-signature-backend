@@ -121,6 +121,22 @@ only callers with an allowed `Origin` or from this machine until `EMAIL_API_KEY`
 set and sent as `x-email-key` / `Authorization: Bearer`. `GET /health` reports the
 state as `emailConfigured` and `emailProtected`.
 
+### Leave the mailbox settings unset on a host that blocks SMTP
+
+Configuring SMTP on a host that cannot reach an SMTP port makes this route fail
+in the worst possible way. The free tier of Render blocks outbound traffic to
+ports 25, 465 and 587 (changelog, 26 September 2025), so a send there times out
+after fifteen seconds and answers `502` — and the app does **not** fall back to
+FormSubmit on a 502, on purpose, because a 502 also covers real faults such as an
+oversized PDF. So the honest "no mailbox here" state is the one that works: with
+`MAIL_TO`/`SMTP_*` unset, `/api/email` answers `503 email_not_configured`, which
+the app already knows how to recover from, and the application goes out through
+the old path instead of failing.
+
+The tell is `GET /health`. `emailConfigured: true` on a host whose SMTP ports are
+blocked means every send will time out; set those variables only where outbound
+SMTP actually works — a paid instance, a VPS, or a local `npm start`.
+
 Setting it up is five variables (`MAIL_TO`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`,
 `SMTP_PASS`; Gmail wants an **app password**, not the account password) — see
 `.env.example` and `render.yaml`. Leaving them unset is a supported state, not a
