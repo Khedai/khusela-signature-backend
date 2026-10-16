@@ -126,6 +126,39 @@ Setting it up is five variables (`MAIL_TO`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER
 `.env.example` and `render.yaml`. Leaving them unset is a supported state, not a
 broken one: `npm test` exercises the 503 path on purpose.
 
+## Emailing a client's signing link
+
+The signing link is the one thing the client cannot reach on their own, so the
+PWA's **Client Digital Signing** panel can have this service mail it to them.
+
+```http
+POST /api/notify/email        application/json
+  manageToken   the token from POST /api/invite (required)
+  signingLink   the link that same call returned (required)
+```
+
+`200` returns `{ ok, messageId, accepted, expiresAt }`.
+
+This is the only route here whose recipient is not the office, so it is the one
+where "who does this go to" is the whole risk. The recipient is
+**`invitations.email` — the address held on the signing request itself**, which
+the consultant's app wrote there from the applicant's own form. It is never read
+from the request: a `to`, `email` or `recipient` field in the body is ignored,
+which `tools/test_signing_link_email.js` sends deliberately in a request that
+otherwise succeeds. The link is checked against that row's `token_hash`, so only
+a link this service minted **for that request** can be mailed — another
+request's link is a `400` rather than a forward, and a made-up token is a `404`.
+A request created without a usable address is a `422` that says to generate a new
+link, and a link the client has already signed with is a `409`.
+
+It is gated exactly like `/api/email` (`EMAIL_API_KEY` as `x-email-key` /
+bearer, otherwise an allowed `Origin` or this machine), rate limited with its own
+counters so a morning's signing links cannot spend the budget that emails the
+PDFs (`NOTIFY_RATE_LIMIT`, default 30 per 10 minutes), and it needs the same
+mailbox: without one it answers the same `503 email_not_configured`, which the app
+reads as "this cannot send it" and leaves **Copy Link** available instead.
+`MAIL_TO` stays the `Reply-To`, so an answer from the client reaches the office.
+
 ## Tests
 ```bash
 npm test
@@ -163,8 +196,20 @@ npm test
   the office can reply to the applicant, the PDF arrives as an attachment with the
   bytes that were sent, a second request inside the window is a 429, and a service
   started without a mailbox answers 503 and says so at startup.
+- `tools/test_signing_link_email.js` — the same fake-SMTP arrangement for
+  `/api/notify/email`, where the recipient is the thing under test: an unknown
+  manage token is a 404, **another request's link is refused** rather than
+  forwarded, a link this service never minted is a 400, a request with no usable
+  address is a 422 that says what to do, and the one real send goes to the address
+  on the database row even though the request names a different one three times.
+  It also reads the delivered message — after undoing quoted-printable, so it
+  reads what a mail client would — and checks the link is in both the text and the
+  HTML body, the office is the `Reply-To`, the audit recorded the send, the
+  client's address is not in the log line, an already-signed link is a 409, a
+  second send inside the window is a 429 about links rather than applications, and
+  a service with no mailbox answers 503.
 
-All four run on a scratch database in `storage/` and clean up after themselves.
+All five run on a scratch database in `storage/` and clean up after themselves.
 
 `npm test` never touches a deployment. To ask a **deployed** service whether it is
 running this repository's code — reads only, no credentials, non-zero exit while it
