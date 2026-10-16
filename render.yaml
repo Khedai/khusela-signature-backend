@@ -123,12 +123,3 @@ services:
       # sender is left at its default (the authenticated account).
       - key: MAX_EMAIL_MB
         value: "20"
-      # ── Emailing a client's signing link ───────────────────────────────────
-      # POST /api/notify/email sends one client's signing link to the address
-      # already held on that signing request (the PWA's "Send via Email"), using
-      # the mailbox configured above. Both settings have working defaults, so this
-      # block is only here to document them: the recipient is read from the
-      # database row and never from the request, so no extra address or secret is
-      # needed for it to work.
-      - key: NOTIFY_RATE_LIMIT
-        value: "30"

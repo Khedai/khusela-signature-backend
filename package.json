@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node tools/test_email_route.js && node tools/test_signing_link_email.js && node tools/test_signature_flow.js && node tools/test_restart.js && node tools/test_migration.js",
+    "test": "node tools/test_email_route.js && node tools/test_signature_flow.js && node tools/test_restart.js && node tools/test_migration.js",
     "check:deployed": "node tools/check_deployed.js"
   },
   "dependencies": {

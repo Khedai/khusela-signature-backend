@@ -7,7 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import 'dotenv/config';
 import { DB_URL, USING_REMOTE_DB, all, get, run, write, ddl, isUniqueViolation } from './db.js';
-import { mailConfigured, sendApplication, sendSigningLink, looksLikeEmail, MAX_EMAIL_BYTES } from './mailer.js';
+import { mailConfigured, sendApplication, MAX_EMAIL_BYTES } from './mailer.js';
 
 const __dirname=path.dirname(fileURLToPath(import.meta.url));
 const PORT=Number(process.env.PORT||3000);
@@ -409,88 +409,6 @@ app.get('/api/manage/:manageToken/signature',wrap(async(req,res)=>{
  if(!bytes) return res.status(404).json({error:'Signature image is no longer available'});
  res.setHeader('Cache-Control','no-store');
  res.type('png').send(Buffer.from(bytes));
-}));
-
-// A signing link is one short message per applicant, so this is limited per
-// address as well — its own counters, separate from /api/email's, because a
-// consultant working through a morning's applications must not spend the
-// budget that emails the finished PDFs, and because that route's error message
-// is about applications. NOTIFY_RATE_LIMIT=0 switches it off. In-process
-// counters, so a redeploy forgets them: the honest limit of a limiter with no
-// shared store behind it.
-const NOTIFY_LIMIT=Math.max(0,Number(process.env.NOTIFY_RATE_LIMIT??30));
-const NOTIFY_WINDOW_MS=Math.max(1000,Number(process.env.NOTIFY_RATE_WINDOW_MS||600000));
-const notifyHits=new Map();
-if(NOTIFY_LIMIT) setInterval(()=>{const t=Date.now();for(const[k,e] of notifyHits) if(t-e.start>=NOTIFY_WINDOW_MS) notifyHits.delete(k);},NOTIFY_WINDOW_MS).unref();
-
-// ── Emailing the signing link to the client ──────────────────────────────────
-// The one thing the client cannot reach on their own. The consultant presses
-// "Send via Email" in the app's Client Digital Signing panel and the app calls
-// this with the manage token it already holds plus the link it was given.
-//
-// Everything that decides who the mail goes to comes from the DATABASE ROW, not
-// from the request: the recipient is invitations.email, which the consultant's
-// own app wrote there from the applicant's form when the request was created.
-// A caller cannot name a recipient here, and cannot supply a link either — the
-// token in the link is hashed and compared with the row's own token_hash, so
-// only a link this service minted can be mailed, and only to the address that
-// link was created for. Together with the same gate as /api/email that is what
-// keeps this from being a mail relay: there is no way to ask it to send
-// anything to an address of your choosing.
-//
-// EMAIL_API_KEY (x-email-key / bearer) protects it exactly as it protects
-// /api/email, and the mailbox has to be configured: without one this answers
-// 503 with the same email_not_configured the app already understands, and the
-// consultant is left with Copy Link rather than a false success.
-function notifyRateLimit(req,res,next){
- if(!NOTIFY_LIMIT) return next();
- const who=String(req.ip||'unknown'); const t=Date.now();
- let e=notifyHits.get(who);
- if(!e||t-e.start>=NOTIFY_WINDOW_MS){e={start:t,n:0};notifyHits.set(who,e);}
- e.n++;
- if(e.n<=NOTIFY_LIMIT) return next();
- const wait=Math.max(1,Math.ceil((e.start+NOTIFY_WINDOW_MS-t)/1000));
- res.setHeader('Retry-After',String(wait));
- res.status(429).json({error:`Too many signing links have been emailed from this address. Please wait ${Math.ceil(wait/60)} minute(s) and try again.`});
-}
-
-app.post('/api/notify/email',notifyRateLimit,emailGate,wrap(async(req,res)=>{
- const b=req.body||{};
- try{
-  const inv=await getManaged(b.manageToken);
-  if(!inv) return res.status(404).json({error:'Signing request not found on this service'});
-  // The link the app is holding, checked against the token this row was created
-  // with. A link from anywhere else — or a mangled one — is refused rather than
-  // mailed, because a client who follows it would reach a stranger's session.
-  const token=String(b.signingLink||'').match(/\/sign\/([A-Za-z0-9_-]{16,})/);
-  if(!token||hashToken(token[1])!==inv.token_hash)
-   return res.status(400).json({error:'That signing link was not issued by this service for this request'});
-  // A request created without an address cannot be emailed to one. Said plainly,
-  // because the app's answer is "enter an email address and generate a new link".
-  if(!looksLikeEmail(inv.email))
-   return res.status(422).json({error:'This signing request has no valid email address. Enter the client\'s email in the app and generate a new link.'});
-  if(inv.used_at||inv.status==='signed')
-   return res.status(409).json({error:'This signing link has already been used, so a new one is needed'});
-  const out=await sendSigningLink({
-   to:inv.email,
-   clientName:inv.client_name,
-   signerLabel:inv.signer_label,
-   applicationRef:inv.application_ref,
-   signingLink:String(b.signingLink).trim(),
-   expiresAt:inv.expires_at,
-  });
-  await audit(inv.id,'signing_link_emailed',req,{channel:'email'});
-  // The client's own address is deliberately not in the log line, the way it is
-  // not in the one for the application: the message headers carry it.
-  console.log(`Signing link emailed (${inv.signer_label||'client'}, message ${out.messageId||'?'}, accepted by ${out.accepted.length} recipient(s))`);
-  res.json({ok:true,messageId:out.messageId,accepted:out.accepted.length>0,expiresAt:inv.expires_at});
- }catch(e){
-  // A refusal or an unreachable mailbox is not the caller's mistake, so it is a
-  // 502 naming the reason: the consultant has to know the link did not go out,
-  // and that copying it by hand is the way to get it to the client today.
-  console.error('signing-link email failed: '+(e&&e.message?e.message:e));
-  res.status(502).json({error:'The signing link could not be emailed: '+((e&&e.message)||'the mail server refused it')});
- }
 }));
 
 // Uploads are held in memory and written straight into the database row below, so
