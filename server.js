@@ -89,9 +89,9 @@ const SCHEMA=[
 // documents already are, so it survives a redeploy the same way.
 `CREATE TABLE IF NOT EXISTS submissions(
  id TEXT PRIMARY KEY, filename TEXT NOT NULL, applicant TEXT, id_number TEXT,
- app_date TEXT, reply_to TEXT, size INTEGER NOT NULL, content BLOB NOT NULL,
- email_status TEXT NOT NULL, email_error TEXT, message_id TEXT, accepted TEXT,
- created_at TEXT NOT NULL
+ signer_label TEXT, app_date TEXT, reply_to TEXT, size INTEGER NOT NULL,
+ content BLOB NOT NULL, email_status TEXT NOT NULL, email_error TEXT, message_id TEXT,
+ accepted TEXT, created_at TEXT NOT NULL
 )`,
 ];
 // Lightweight migrations: CREATE TABLE IF NOT EXISTS never adds a column to a
@@ -115,6 +115,9 @@ async function prepareDatabase(){
  // tables; the bytes themselves are stored in the database now.
  await ensureColumn('signatures','signature_data','BLOB');
  await ensureColumn('documents','content','BLOB');
+ // The report bucket records who signed it alongside the applicant's name and ID,
+ // so a report can be matched to the signing request it came from.
+ await ensureColumn('submissions','signer_label','TEXT');
  // The manage token is the consultant-side capability: it is only ever returned
  // to the app that created the request, never sent to the client.
  await run('CREATE UNIQUE INDEX IF NOT EXISTS idx_invitations_manage_token ON invitations(manage_token_hash)');
@@ -377,9 +380,9 @@ const emailUpload=multer({
 function cleanSubmissionText(v,n){return String(v==null?'':v).replace(/[\r\n]+/g,' ').trim().slice(0,n);}
 async function saveSubmission({file,b,submissionId,status}){
  await run(
-  `INSERT INTO submissions(id,filename,applicant,id_number,app_date,reply_to,size,content,email_status,created_at)
-   VALUES(?,?,?,?,?,?,?,?,?,?)`,
-  [submissionId,cleanSubmissionText(file.originalname,200),cleanSubmissionText(b.applicant,120),cleanSubmissionText(b.idNumber,40),cleanSubmissionText(b.date,40),cleanSubmissionText(b.replyTo,200),file.size,file.buffer,status,now()],
+  `INSERT INTO submissions(id,filename,applicant,id_number,signer_label,app_date,reply_to,size,content,email_status,created_at)
+   VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+  [submissionId,cleanSubmissionText(file.originalname,200),cleanSubmissionText(b.applicant,120),cleanSubmissionText(b.idNumber,40),cleanSubmissionText(b.signerLabel,80),cleanSubmissionText(b.date,40),cleanSubmissionText(b.replyTo,200),file.size,file.buffer,status,now()],
  );
 }
 async function updateSubmission(submissionId,{status,error,messageId,accepted}){
@@ -413,6 +416,7 @@ app.post('/api/email',emailRateLimit,emailGate,emailUpload.single('attachment'),
    pdf:file.buffer,
    applicant:b.applicant,
    idNumber:b.idNumber,
+   signerLabel:b.signerLabel,
    date:b.date,
    replyTo:b.replyTo,
    // Only used if Formspree's plan refuses the file and it falls back to a link.
@@ -595,11 +599,11 @@ app.get('/api/submissions/:id/pdf',wrap(async(req,res)=>{
  sendSubmissionPdf(res,row);
 }));
 app.get('/api/admin/submissions',requireAdmin,wrap(async(req,res)=>{
- const rows=await all('SELECT id,filename,applicant,id_number,app_date,size,email_status,email_error,message_id,accepted,created_at FROM submissions ORDER BY created_at DESC LIMIT 500');
+ const rows=await all('SELECT id,filename,applicant,id_number,signer_label,app_date,size,email_status,email_error,message_id,accepted,created_at FROM submissions ORDER BY created_at DESC LIMIT 500');
  res.json({ok:true,rows});
 }));
 app.get('/api/admin/submissions/:id',requireAdmin,wrap(async(req,res)=>{
- const row=await get('SELECT id,filename,applicant,id_number,app_date,reply_to,size,email_status,email_error,message_id,accepted,created_at FROM submissions WHERE id=?',[req.params.id]);
+ const row=await get('SELECT id,filename,applicant,id_number,signer_label,app_date,reply_to,size,email_status,email_error,message_id,accepted,created_at FROM submissions WHERE id=?',[req.params.id]);
  if(!row) return res.status(404).json({error:'Submission not found'});
  res.json({ok:true,submission:row});
 }));
@@ -616,7 +620,7 @@ app.get('/api/admin/submissions/:id/pdf',requireAdmin,wrap(async(req,res)=>{
 // delivery path is configured, the office pushes a backed-up report out from
 // here instead of asking the consultant to resubmit from the PWA.
 app.post('/api/admin/submissions/:id/resend',requireAdmin,wrap(async(req,res)=>{
- const row=await get('SELECT id,filename,applicant,id_number,app_date,reply_to,content FROM submissions WHERE id=?',[req.params.id]);
+ const row=await get('SELECT id,filename,applicant,id_number,signer_label,app_date,reply_to,content FROM submissions WHERE id=?',[req.params.id]);
  if(!row) return res.status(404).json({error:'Submission not found'});
  if(!mailConfigured()) return res.status(503).json({error:'email_not_configured',message:'No delivery is configured yet (mailbox, Brevo or Formspree), so nothing was emailed.'});
  const bytes=row.content;
@@ -627,6 +631,7 @@ app.post('/api/admin/submissions/:id/resend',requireAdmin,wrap(async(req,res)=>{
    pdf:Buffer.from(bytes),
    applicant:row.applicant,
    idNumber:row.id_number,
+   signerLabel:row.signer_label,
    date:row.app_date,
    replyTo:row.reply_to,
    downloadUrl:submissionDownloadUrl(row.id),

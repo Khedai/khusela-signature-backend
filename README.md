@@ -108,11 +108,12 @@ guards the route. Before it mails anything, the route writes the PDF into the
 the email cannot go out (no mailbox, a refused message, a missed spam folder).
 
 **Downloading the bucket.** The office reads it at the admin page
-`https://<service>/admin` — a list of every submission (newest first, with whether
-it was emailed) and a **Download PDF** button per row. The page is useless without
-the `ADMIN_API_KEY`, so a consultant's shared PWA screen can never open it. The
-same data is available as `GET /api/admin/submissions*` with the
-`x-admin-key: <ADMIN_API_KEY>` header.
+`https://<service>/admin` — a list of every submission, newest first, showing the
+applicant’s **name, ID number, signer label, application date**, when it arrived,
+its size, and whether it was emailed — with a **Download PDF** button per row. The
+page is useless without the `ADMIN_API_KEY`, so a consultant's shared PWA screen
+can never open it. The same data is available as `GET /api/admin/submissions*`
+with the `x-admin-key: <ADMIN_API_KEY>` header.
 
 This replaced a third-party form-to-email service (FormSubmit) that the PWA posted
 the PDF to directly. On 2026-09-30 that service answered every submission with a
@@ -120,11 +121,16 @@ the PDF to directly. On 2026-09-30 that service answered every submission with a
 hidden iframe, could not see the status and so reported success. A PDF does arrive
 now or the app says so.
 
+Submissions sent before this bucket existed — the FormSubmit era — were never
+stored here. If one of those emails did not arrive, there is no copy to recover;
+only the email itself, if it reached the office, remains.
+
 ```http
 POST /api/email            multipart/form-data
   attachment   the PDF (required, at most MAX_EMAIL_MB)
   applicant    name shown in the subject and body
   idNumber     shown in the body, so the mail can be filed
+  signerLabel  which applicant box(es) carry a signature (Applicant 1, …)
   date         the date shown on the application
   replyTo      the consultant's address for Reply-To, if there is one
 ```
@@ -173,6 +179,10 @@ blocked but with no `BREVO_API_KEY`/`FORMSPREE_ENDPOINT` means every send will
 time out; set one of the HTTPS paths (or move to a paid instance / VPS and set
 the SMTP variables).
 
+Brevo and Formspree calls have their own timeout (`MAIL_HTTP_TIMEOUT_MS`, default
+45 s). A provider that accepts the connection and then goes silent is treated as
+a refusal, so the next path is tried instead of hanging until the PWA gives up.
+
 A backed-up application can be pushed out once delivery is working — the "fallback
 after the backup" — with `POST /api/admin/submissions/:id/resend` (admin key).
 
@@ -211,8 +221,10 @@ npm test
   reaches exactly one recipient and it is the office address even when the request
   tries to name another, the applicant and ID number appear in the subject and body,
   the office can reply to the applicant, the PDF arrives as an attachment with the
-  bytes that were sent, a second request inside the window is a 429, and a service
-  started without a mailbox answers 503 and says so at startup.
+  bytes that were sent, a second request inside the window is a 429, a service
+  started without a mailbox answers 503 and says so at startup, and a provider
+  that never answers is cut off by the timeout and reported as a 502 while the
+  PDF stays in the bucket.
 All four run on a scratch database in `storage/` and clean up after themselves.
 
 `npm test` never touches a deployment. To ask a **deployed** service whether it is

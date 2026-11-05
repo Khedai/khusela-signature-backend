@@ -33,6 +33,9 @@
 //               applicant's name is appended to it.
 //   MAX_EMAIL_MB  20 by default. Gmail refuses a message over 25 MB including
 //               its own encoding overhead, so the ceiling sits under that.
+//   MAIL_HTTP_TIMEOUT_MS
+//               how long a Brevo or Formspree request may take before it is
+//               treated as a refusal and the next path is tried (45 s default).
 //   BREVO_API_KEY
 //               the free HTTPS attachment path. Render's free tier blocks SMTP
 //               ports (25/465/587), so a free instance cannot use the SMTP path
@@ -74,6 +77,11 @@ export const MAIL_FROM=process.env.MAIL_FROM||SMTP_USER;
 export const MAIL_SUBJECT=process.env.MAIL_SUBJECT||'Khusela Credit Application - ITC report';
 export const MAX_EMAIL_MB=Math.min(24,Math.max(1,Number(process.env.MAX_EMAIL_MB||20)));
 export const MAX_EMAIL_BYTES=MAX_EMAIL_MB*1024*1024;
+// How long an HTTPS provider may take before it is treated as a refusal and the
+// next path is tried. A dead provider must fail instead of hanging the request:
+// the PWA gives up after two minutes, so a provider stuck in a black hole would
+// otherwise waste that whole window. Overridable so the suite can test it fast.
+export const MAIL_HTTP_TIMEOUT_MS=Math.min(120000,Math.max(1000,Number(process.env.MAIL_HTTP_TIMEOUT_MS||45000)));
 // Brevo over HTTPS: the free-plan path that carries the PDF as an attachment even
 // on a host (Render free) whose SMTP ports are blocked. Empty means "not set up".
 export const BREVO_API_KEY=process.env.BREVO_API_KEY||'';
@@ -126,13 +134,15 @@ const cleanField=(v,n)=>String(v==null?'':v).replace(/[\r\n]+/g,' ').trim().slic
 // the path cannot carry the attachment (Formspree's free plan); the secure link
 // is then the way to the PDF, and the text says so rather than pretending a file
 // is attached.
-function applicationText({applicant,idNumber,date,downloadUrl}={}){
+function applicationText({applicant,idNumber,signerLabel,date,downloadUrl}={}){
  const who=cleanField(applicant,120);
  const ref=cleanField(idNumber,40);
+ const signer=cleanField(signerLabel,80);
  const when=cleanField(date,40);
  return [
   `Applicant: ${who||'(not given)'}`,
   ref?`ID number: ${ref}`:null,
+  signer?`Signer: ${signer}`:null,
   when?`Date: ${when}`:null,
   '',
   downloadUrl
@@ -147,10 +157,10 @@ function applicationText({applicant,idNumber,date,downloadUrl}={}){
 // Only runs when SMTP_USER/SMTP_PASS/MAIL_TO are set — a paid host or a local
 // `npm start`. Render's free tier cannot reach SMTP ports (25/465/587), so there
 // this path is simply skipped and an HTTPS path below carries the application.
-async function sendViaSmtp({filename,pdf,applicant,idNumber,date,replyTo}={}){
+async function sendViaSmtp({filename,pdf,applicant,idNumber,signerLabel,date,replyTo}={}){
  const who=cleanField(applicant,120);
  const name=cleanField(filename,120)||'Khusela-Credit-Application.pdf';
- const body=applicationText({applicant,idNumber,date});
+ const body=applicationText({applicant,idNumber,signerLabel,date});
  const mail={
   from:MAIL_FROM,
   to:MAIL_TO.join(','),
@@ -177,7 +187,7 @@ async function sendViaSmtp({filename,pdf,applicant,idNumber,date,replyTo}={}){
 // plan accepts an attachment (up to 25 MB) and 300 messages a day, so this is the
 // permanent way to keep the actual PDF in the office's inbox on a free instance.
 // The recipient is still MAIL_TO and nothing in the request can name one.
-async function sendViaBrevo({filename,pdf,applicant,idNumber,date,replyTo}={}){
+async function sendViaBrevo({filename,pdf,applicant,idNumber,signerLabel,date,replyTo}={}){
  if(!brevoConfigured()) throw new Error('Brevo is not configured on the server (BREVO_API_KEY / BREVO_SENDER / MAIL_TO)');
  const who=cleanField(applicant,120);
  const reply=cleanField(replyTo,200);
@@ -185,7 +195,7 @@ async function sendViaBrevo({filename,pdf,applicant,idNumber,date,replyTo}={}){
   sender:{email:BREVO_SENDER, name:'Khusela Management'},
   to:MAIL_TO.map(email=>({email})),
   subject:who?`${MAIL_SUBJECT} - ${who}`:MAIL_SUBJECT,
-  textContent:applicationText({applicant,idNumber,date}),
+  textContent:applicationText({applicant,idNumber,signerLabel,date}),
   attachment:[{
    name:cleanField(filename,120)||'Khusela-Credit-Application.pdf',
    content:Buffer.from(pdf).toString('base64'),
@@ -198,8 +208,12 @@ async function sendViaBrevo({filename,pdf,applicant,idNumber,date,replyTo}={}){
    method:'POST',
    headers:{'api-key':BREVO_API_KEY,'Content-Type':'application/json',Accept:'application/json'},
    body:JSON.stringify(payload),
+   signal:AbortSignal.timeout(MAIL_HTTP_TIMEOUT_MS),
   });
  }catch(e){
+  if(e&&(e.name==='TimeoutError'||e.name==='AbortError')){
+   throw new Error(`Brevo did not answer within ${Math.round(MAIL_HTTP_TIMEOUT_MS/1000)} s`);
+  }
   throw new Error('Brevo could not be reached: '+(e&&e.message?e.message:e));
  }
  if(!res.ok){
@@ -219,7 +233,7 @@ async function sendViaBrevo({filename,pdf,applicant,idNumber,date,replyTo}={}){
 // application is posted again without the file and with `downloadUrl` — a
 // secure, expiring link generated by server.js — in the email. The office still
 // gets the application, and the bucket remains the permanent copy.
-async function sendViaFormspree({filename,pdf,applicant,idNumber,date,replyTo,downloadUrl}={}){
+async function sendViaFormspree({filename,pdf,applicant,idNumber,signerLabel,date,replyTo,downloadUrl}={}){
  if(!FORMSPREE_ENDPOINT) throw new Error('Formspree is not configured on the server');
  const who=cleanField(applicant,120);
  const reply=cleanField(replyTo,200);
@@ -229,6 +243,7 @@ async function sendViaFormspree({filename,pdf,applicant,idNumber,date,replyTo,do
   if(looksLikeEmail(reply)) form.append('_replyto', reply);
   form.append('Applicant', who||'(not given)');
   form.append('ID Number', cleanField(idNumber,40));
+  form.append('Signer', cleanField(signerLabel,80));
   form.append('Date', cleanField(date,40));
   if(withFile){
    form.append('attachment', new Blob([pdf], {type:'application/pdf'}), cleanField(filename,120)||'Khusela-Credit-Application.pdf');
@@ -242,8 +257,14 @@ async function sendViaFormspree({filename,pdf,applicant,idNumber,date,replyTo,do
   }
   let res;
   try{
-   res=await fetch(FORMSPREE_ENDPOINT,{method:'POST',body:form,headers:{Accept:'application/json'}});
+   res=await fetch(FORMSPREE_ENDPOINT,{
+    method:'POST',body:form,headers:{Accept:'application/json'},
+    signal:AbortSignal.timeout(MAIL_HTTP_TIMEOUT_MS),
+   });
   }catch(e){
+   if(e&&(e.name==='TimeoutError'||e.name==='AbortError')){
+    throw new Error(`Formspree did not answer within ${Math.round(MAIL_HTTP_TIMEOUT_MS/1000)} s`);
+   }
    throw new Error('Formspree could not be reached: '+(e&&e.message?e.message:e));
   }
   let body='';
@@ -270,21 +291,22 @@ async function sendViaFormspree({filename,pdf,applicant,idNumber,date,replyTo,do
 // PDF is already in the bucket by the time this runs (see server.js), so nothing
 // here can lose an application. `downloadUrl` is used only by Formspree's
 // file-upload fallback.
-export async function sendApplication({filename,pdf,applicant,idNumber,date,replyTo,downloadUrl}={}){
+export async function sendApplication({filename,pdf,applicant,idNumber,signerLabel,date,replyTo,downloadUrl}={}){
  if(!mailConfigured()) throw new Error('Email is not configured on the server');
  if(!pdf||!pdf.length) throw new Error('The PDF attachment is empty');
  if(pdf.length>MAX_EMAIL_BYTES) throw new Error(`The PDF is ${(pdf.length/1048576).toFixed(1)} MB, over this service's ${MAX_EMAIL_MB} MB email limit`);
  const errors=[];
+ const delivery={filename,pdf,applicant,idNumber,signerLabel,date,replyTo};
  if(smtpConfigured()){
-  try{ return await sendViaSmtp({filename,pdf,applicant,idNumber,date,replyTo}); }
+  try{ return await sendViaSmtp(delivery); }
   catch(e){ errors.push('mailbox: '+(e&&e.message?e.message:e)); }
  }
  if(brevoConfigured()){
-  try{ return await sendViaBrevo({filename,pdf,applicant,idNumber,date,replyTo}); }
+  try{ return await sendViaBrevo(delivery); }
   catch(e){ errors.push('Brevo: '+(e&&e.message?e.message:e)); }
  }
  if(FORMSPREE_ENDPOINT){
-  try{ return await sendViaFormspree({filename,pdf,applicant,idNumber,date,replyTo,downloadUrl}); }
+  try{ return await sendViaFormspree(Object.assign({downloadUrl},delivery)); }
   catch(e){ errors.push('Formspree: '+(e&&e.message?e.message:e)); }
  }
  throw new Error(errors.length?errors.join('; '):'Email is not configured on the server');

@@ -129,11 +129,16 @@ services:
       # rather than storing it in this repository.
       # - key: SMTP_PASS
       #   sync: false
+      # The sender defaults to SMTP_USER; set it only for a verified alias.
+      # - key: MAIL_FROM
+      #   value: khuselamanagement@gmail.com
       # MAIL_TO is the only address this service will ever send to: the app cannot
       # name a recipient, so a copied URL cannot be used to mail strangers. The
       # sender is left at its default (the authenticated account).
       # - key: MAX_EMAIL_MB
       #   value: "20"
+      # - key: MAIL_HTTP_TIMEOUT_MS
+      #   value: "45000"
       # The secure links put in Formspree emails default to ADMIN_API_KEY and last
       # 30 days; both can be changed here.
       # - key: SUBMISSION_LINK_SECRET

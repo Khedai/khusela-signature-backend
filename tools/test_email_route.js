@@ -163,6 +163,30 @@ function startFakeBrevo() {
 }
 
 
+// A provider that accepts the connection and never answers. The route must give
+// up on its own timeout and answer 502 instead of hanging until the client does.
+function startHangingServer() {
+  const sockets = new Set();
+  const server = http.createServer((req, res) => {
+    req.resume();
+    // Deliberately no res.end(): the request stays open until the client aborts.
+  });
+  server.on('connection', (socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve({
+      port: server.address().port,
+      close: () => new Promise((r) => {
+        try { server.closeAllConnections(); } catch (e) {}
+        server.close(() => r());
+      }),
+    }));
+  });
+}
+
+
 function startServer(port, extra) {
   const child = spawn(process.execPath, ['server.js'], {
     cwd: ROOT,
@@ -234,13 +258,14 @@ async function postEmail(base, opts) {
 }
 
 const KEY = 'test-email-key';
-const APP = { applicant: 'Thabo Mokoena', idNumber: '9001015800085', date: '2026-09-30', replyTo: 'thabo@example.com' };
+const APP = { applicant: 'Thabo Mokoena', idNumber: '9001015800085', signerLabel: 'Applicant 1', date: '2026-09-30', replyTo: 'thabo@example.com' };
 
 
 // ── 1. A configured service, with a key set ───────────────────────────────────
 const smtp = await startFakeSmtp();
 let srv = null, limited = null, bare = null, fsp = null, formspree = null, notConfiguredId = null;
 let brevoSrv = null, brevo = null, fspFree = null, formspreeFree = null;
+let hangSrv = null, hanging = null;
 const MAILBOX = {
   SMTP_HOST: '127.0.0.1', SMTP_PORT: String(smtp.port), SMTP_SECURE: 'false',
   SMTP_USER: SENDER, SMTP_PASS: 'fake-app-password',
@@ -315,6 +340,8 @@ try {
   check('the office can reply straight to the applicant', /^Reply-To: .*thabo@example\.com/m.test(mail), mail.split('\n').find((l) => l.startsWith('Reply-To')) || '');
   check('the body names the applicant and the ID number',
     mail.includes('Applicant: Thabo Mokoena') && mail.includes('ID number: 9001015800085'), '');
+  check('and the signer label, so the report can be matched to its signature',
+    mail.includes('Signer: Applicant 1'), '');
 
   const at = mail.indexOf('Content-Type: application/pdf');
   const headEnd = at < 0 ? -1 : mail.indexOf('\n\n', at);
@@ -334,6 +361,12 @@ try {
   // endpoints whatever happened to the mailbox after this.
   const sentSub = await (await fetch(srv.base + '/api/admin/submissions/' + sent.json.submissionId, { headers: { 'x-admin-key': 'test-key' } })).json();
   check('the emailed application was stored with status sent', sentSub.ok === true && sentSub.submission && sentSub.submission.email_status === 'sent', JSON.stringify(sentSub));
+  check('and the bucket kept the name, ID, signer label and application date',
+    sentSub.submission.applicant === 'Thabo Mokoena'
+      && sentSub.submission.id_number === '9001015800085'
+      && sentSub.submission.signer_label === 'Applicant 1'
+      && sentSub.submission.app_date === '2026-09-30',
+    JSON.stringify(sentSub.submission));
   const sentPdf = await fetch(srv.base + '/api/admin/submissions/' + sent.json.submissionId + '/pdf', { headers: { 'x-admin-key': 'test-key' } });
   const sentBytes = Buffer.from(await sentPdf.arrayBuffer());
   check('the stored PDF downloads byte-for-byte', sentBytes.equals(PDF), sentBytes.length + ' vs ' + PDF.length);
@@ -400,6 +433,7 @@ try {
   const fsBody = formspree.requests[0] ? formspree.requests[0].body : Buffer.alloc(0);
   check('and the PDF bytes reached Formspree', fsBody.includes(PDF), '');
   check('and the applicant reached Formspree', fsBody.includes(Buffer.from('Thabo Mokoena')), '');
+  check('and the signer label reached Formspree', fsBody.includes(Buffer.from('Signer')), '');
   check('and the attachment field carried the file', fsBody.includes(Buffer.from('name="attachment"')), '');
   check('and the stored submission was marked sent', !!viaFs.json && !!viaFs.json.submissionId && viaFs.json.stored === true, JSON.stringify(viaFs.json));
 
@@ -434,12 +468,35 @@ try {
   check('the Brevo key travelled in the api-key header', brevoReq.headers['api-key'] === 'brevo-test-key', String(brevoReq.headers['api-key']));
   check('the office is the only recipient', Array.isArray(brevoReq.json.to) && brevoReq.json.to.length === 1 && brevoReq.json.to[0].email === OFFICE, JSON.stringify(brevoReq.json.to));
   check('the sender is the verified Brevo sender', brevoReq.json.sender && brevoReq.json.sender.email === OFFICE, JSON.stringify(brevoReq.json.sender));
+  check('the Brevo body carries the signer label',
+    /Signer: Applicant 1/.test(brevoReq.json.textContent || ''), String(brevoReq.json.textContent).slice(0, 200));
   const brevoFile = brevoReq.json.attachment && brevoReq.json.attachment[0];
   const brevoBytes = brevoFile ? Buffer.from(brevoFile.content, 'base64') : Buffer.alloc(0);
   check('the PDF travelled base64-encoded in the attachment', brevoBytes.equals(PDF), brevoBytes.length + ' vs ' + PDF.length);
   check('the Brevo delivery was stored as sent', !!viaBrevo.json && !!viaBrevo.json.submissionId && viaBrevo.json.stored === true, JSON.stringify(viaBrevo.json));
   await stop(brevoSrv); brevoSrv = null;
   await brevo.close(); brevo = null;
+
+  // ── 6b. An HTTPS provider that never answers ───────────────────────────────
+  // A dead provider must fail on its own timeout, not wait for the PWA's two
+  // minutes. The route still stores the PDF first, so the 502 carries stored:true.
+  hanging = await startHangingServer();
+  hangSrv = startServer(3917, {
+    SMTP_USER: '', SMTP_PASS: '', MAIL_TO: OFFICE, MAIL_FROM: '', SMTP_HOST: '',
+    BREVO_API_KEY: 'brevo-test-key', BREVO_SENDER: OFFICE,
+    BREVO_API_URL: 'http://127.0.0.1:' + hanging.port + '/v3/smtp/email',
+    MAIL_HTTP_TIMEOUT_MS: '1000', EMAIL_RATE_LIMIT: '50',
+  });
+  check('the timeout service starts', await waitReady(hangSrv.base));
+  const timedOut = await postEmail(hangSrv.base, { fields: APP, files: PDF_FILE });
+  check('a provider that never answers is a 502', timedOut.status === 502,
+    'HTTP ' + timedOut.status + ' ' + JSON.stringify(timedOut.json));
+  check('and the application is still stored', !!timedOut.json && timedOut.json.stored === true, JSON.stringify(timedOut.json));
+  const timedOutSub = await (await fetch(hangSrv.base + '/api/admin/submissions/' + timedOut.json.submissionId,
+    { headers: { 'x-admin-key': 'test-key' } })).json();
+  check('with email_status failed', timedOutSub.submission && timedOutSub.submission.email_status === 'failed', JSON.stringify(timedOutSub));
+  await stop(hangSrv); hangSrv = null;
+  await hanging.close(); hanging = null;
 
   // ── 7. Formspree's free plan: file refused, secure link instead ─────────────
   // This is the live 400 ("File Uploads Not Permitted") that stopped delivery.
@@ -485,6 +542,8 @@ try {
   if (formspree) await formspree.close();
   if (brevoSrv) await stop(brevoSrv);
   if (brevo) await brevo.close();
+  if (hangSrv) await stop(hangSrv);
+  if (hanging) await hanging.close();
   if (fspFree) await stop(fspFree);
   if (formspreeFree) await formspreeFree.close();
   await smtp.close();

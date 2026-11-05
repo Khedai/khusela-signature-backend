@@ -70,7 +70,7 @@
     if (!rows.length) {
       const tr = document.createElement('tr');
       const td = document.createElement('td');
-      td.colSpan = 6;
+      td.colSpan = 8;
       td.textContent = 'No applications have been submitted yet.';
       tr.appendChild(td);
       listBody.appendChild(tr);
@@ -86,6 +86,14 @@
       const idTd = document.createElement('td');
       idTd.textContent = r.id_number || '';
       tr.appendChild(idTd);
+
+      const signerTd = document.createElement('td');
+      signerTd.textContent = r.signer_label || '';
+      tr.appendChild(signerTd);
+
+      const appDateTd = document.createElement('td');
+      appDateTd.textContent = r.app_date || '';
+      tr.appendChild(appDateTd);
 
       const whenTd = document.createElement('td');
       whenTd.textContent = r.created_at ? r.created_at.slice(0, 16).replace('T', ' ') : '';
