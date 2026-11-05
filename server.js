@@ -7,7 +7,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import 'dotenv/config';
 import { DB_URL, USING_REMOTE_DB, all, get, run, write, ddl, isUniqueViolation } from './db.js';
-import { mailConfigured, sendApplication, MAX_EMAIL_BYTES } from './mailer.js';
+import { mailConfigured, mailPaths, sendApplication, MAX_EMAIL_BYTES } from './mailer.js';
 
 const __dirname=path.dirname(fileURLToPath(import.meta.url));
 const PORT=Number(process.env.PORT||3000);
@@ -163,6 +163,34 @@ app.use(express.static(path.join(__dirname,'public')));
 function now(){return new Date().toISOString();}
 function id(){return crypto.randomUUID();}
 function hashToken(t){return crypto.createHash('sha256').update(t).digest('hex');}
+// A secure, expiring download link for ONE stored application. It is used only
+// in the email Formspree sends when its plan refuses the PDF attachment, so the
+// office still has a way to the report without exposing the bucket. The token is
+// an HMAC, not a stored secret: rotating the key (or ADMIN_API_KEY, which it
+// defaults to) invalidates every link already sent. /admin remains the permanent,
+// key-gated way in.
+const SUBMISSION_LINK_SECRET=process.env.SUBMISSION_LINK_SECRET||process.env.ADMIN_API_KEY||'';
+const configuredLinkDays=Number(process.env.SUBMISSION_LINK_DAYS||30);
+const SUBMISSION_LINK_DAYS=Number.isFinite(configuredLinkDays)&&configuredLinkDays>0
+ ?Math.min(365,Math.max(1,configuredLinkDays))
+ :30;
+function submissionLinkSignature(submissionId,expires){
+ return crypto.createHmac('sha256',SUBMISSION_LINK_SECRET).update(`${submissionId}.${expires}`).digest('base64url');
+}
+function submissionDownloadUrl(submissionId){
+ if(!SUBMISSION_LINK_SECRET) return '';
+ const expires=Date.now()+SUBMISSION_LINK_DAYS*86400000;
+ const sig=submissionLinkSignature(submissionId,expires);
+ return `${BASE}/api/submissions/${encodeURIComponent(submissionId)}/pdf?expires=${expires}&signature=${encodeURIComponent(sig)}`;
+}
+function submissionDownloadAllowed(submissionId,expires,signature){
+ if(!SUBMISSION_LINK_SECRET) return false;
+ const exp=Number(expires);
+ if(!Number.isFinite(exp)||exp<Date.now()) return false;
+ const expected=Buffer.from(submissionLinkSignature(submissionId,exp));
+ const given=Buffer.from(String(signature||''));
+ return expected.length===given.length&&crypto.timingSafeEqual(expected,given);
+}
 // Express 4 does not pass a rejected promise from an async handler on to the error
 // middleware, so an async route that throws would leave the request hanging until
 // the client gave up. Wrapping keeps such failures ordinary error responses.
@@ -235,7 +263,7 @@ function inviteRateLimit(req,res,next){
 // pushed?" is one request with no credentials: Render puts the commit in
 // RENDER_GIT_COMMIT, and tools/check_deployed.js compares it with the local HEAD.
 // Anything without that variable — a laptop running npm start — says 'local'.
-app.get('/health',(req,res)=>res.json({ok:true,service:'khusela-digital-signature',build:process.env.RENDER_GIT_COMMIT||'local',inviteProtected:!!INVITE_KEY,emailConfigured:mailConfigured(),emailProtected:!!process.env.EMAIL_API_KEY,time:now()}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'khusela-digital-signature',build:process.env.RENDER_GIT_COMMIT||'local',inviteProtected:!!INVITE_KEY,emailConfigured:mailConfigured(),emailPaths:mailPaths(),emailProtected:!!process.env.EMAIL_API_KEY,time:now()}));
 
 // The client's link points at /sign/<token>, but the page behind it is one static
 // file for every token: public/sign.html reads the token out of its own path.
@@ -291,7 +319,7 @@ app.post('/api/invite',inviteRateLimit,wrap(async(req,res)=>{
 // this machine is accepted. /health reports both states, as emailConfigured and
 // emailProtected, so neither is a guess.
 const EMAIL_KEY=process.env.EMAIL_API_KEY||'';
-if(!mailConfigured()) console.warn('WARNING: no delivery is configured (SMTP_* + MAIL_TO, or FORMSPREE_ENDPOINT), so POST /api/email answers 503 after storing the PDF in the bucket. Set one of them to send applications from this service.');
+if(!mailConfigured()) console.warn('WARNING: no delivery is configured (SMTP_* + MAIL_TO, BREVO_API_KEY, or FORMSPREE_ENDPOINT), so POST /api/email answers 503 after storing the PDF in the bucket. Set one of them to send applications from this service.');
 function presentedEmailKey(req){
  const header=req.get('x-email-key');
  if(header) return header;
@@ -347,11 +375,17 @@ const emailUpload=multer({
 // went out, so the office can tell a backed-up-but-not-emailed report from one
 // that arrived in the inbox.
 function cleanSubmissionText(v,n){return String(v==null?'':v).replace(/[\r\n]+/g,' ').trim().slice(0,n);}
-async function saveSubmission({file,b,submissionId,status,error,messageId,accepted}){
+async function saveSubmission({file,b,submissionId,status}){
  await run(
-  `INSERT INTO submissions(id,filename,applicant,id_number,app_date,reply_to,size,content,email_status,email_error,message_id,accepted,created_at)
-   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-  [submissionId,cleanSubmissionText(file.originalname,200),cleanSubmissionText(b.applicant,120),cleanSubmissionText(b.idNumber,40),cleanSubmissionText(b.date,40),cleanSubmissionText(b.replyTo,200),file.size,file.buffer,status,error||null,messageId||null,accepted||null,now()],
+  `INSERT INTO submissions(id,filename,applicant,id_number,app_date,reply_to,size,content,email_status,created_at)
+   VALUES(?,?,?,?,?,?,?,?,?,?)`,
+  [submissionId,cleanSubmissionText(file.originalname,200),cleanSubmissionText(b.applicant,120),cleanSubmissionText(b.idNumber,40),cleanSubmissionText(b.date,40),cleanSubmissionText(b.replyTo,200),file.size,file.buffer,status,now()],
+ );
+}
+async function updateSubmission(submissionId,{status,error,messageId,accepted}){
+ await run(
+  'UPDATE submissions SET email_status=?,email_error=?,message_id=?,accepted=? WHERE id=?',
+  [status,error||null,messageId||null,accepted||null,submissionId],
  );
 }
 
@@ -360,16 +394,18 @@ app.post('/api/email',emailRateLimit,emailGate,emailUpload.single('attachment'),
  if(!file) return res.status(400).json({error:'The application PDF is missing from the request'});
  const b=req.body||{};
  const submissionId=id();
- // The application is stored first, whatever the mailbox does with it. If the
- // database is down there is nothing to store and nothing to email, so the error
- // handler answers that failure rather than a route pretending it kept a copy.
+ // Stored FIRST, before any delivery is attempted. If this insert fails there is
+ // no copy and nothing is emailed: the error handler answers that failure instead
+ // of a route pretending it kept a report. Every later outcome only updates this
+ // row, so a crash during delivery cannot lose the PDF.
+ await saveSubmission({file,b,submissionId,status:'pending'});
  if(!mailConfigured()){
-  await saveSubmission({file,b,submissionId,status:'not_configured'});
-  // Still the same 503 the PWA reads as "no mailbox here", now carrying the proof
-  // that the PDF was kept: submissionId + stored. The app uses that to say the
-  // application was saved to the office's bucket rather than fall back to a
+  await updateSubmission(submissionId,{status:'not_configured'});
+  // Still the same 503 the PWA reads as "no delivery here", now carrying the
+  // proof that the PDF was kept: submissionId + stored. The app uses that to say
+  // the application was saved to the office's bucket rather than fall back to a
   // form-to-email service that cannot confirm delivery.
-  return res.status(503).json({error:'email_not_configured',message:'No delivery is configured yet (mailbox or Formspree), so the application was not emailed — but it has been saved to the office\'s report bucket.',submissionId,stored:true});
+  return res.status(503).json({error:'email_not_configured',message:'No delivery is configured yet (mailbox, Brevo or Formspree), so the application was not emailed — but it has been saved to the office\'s report bucket.',submissionId,stored:true});
  }
  try{
   const out=await sendApplication({
@@ -379,22 +415,22 @@ app.post('/api/email',emailRateLimit,emailGate,emailUpload.single('attachment'),
    idNumber:b.idNumber,
    date:b.date,
    replyTo:b.replyTo,
+   // Only used if Formspree's plan refuses the file and it falls back to a link.
+   downloadUrl:submissionDownloadUrl(submissionId),
   });
-  await saveSubmission({file,b,submissionId,status:'sent',messageId:out.messageId||null,accepted:(out.accepted||[]).join(', ')});
+  await updateSubmission(submissionId,{status:'sent',messageId:out.messageId||null,accepted:(out.accepted||[]).join(', ')});
   // One line per application that went out, so the log answers "did it arrive?"
   // without a mailbox. The applicant's own address is deliberately not in it —
   // the message headers carry that and this log is not the place for it.
   console.log(`Application emailed (${(file.size/1048576).toFixed(1)} MB, message ${out.messageId||'?'}, accepted by ${out.accepted.join(', ')||'nobody'}) — saved as submission ${submissionId}`);
-  res.json({ok:true,messageId:out.messageId,accepted:out.accepted.length>0,submissionId,stored:true});
+  res.json({ok:true,messageId:out.messageId,accepted:out.accepted.length>0,submissionId,stored:true,linkOnly:!!out.linkOnly});
  }catch(e){
-  // The mailbox refused the message or could not be reached. That is neither the
+  // Every delivery path refused or could not be reached. That is neither the
   // caller's mistake nor a fault in this process, so it is a 502 carrying the
   // reason: a consultant needs to know the application did not go, and that
-  // retrying is worth it. A wrong password shows up here, which is the whole
-  // point of testing it before the office depends on it. The PDF is still in the
-  // bucket, so nothing is lost.
+  // retrying is worth it. The PDF is still in the bucket, so nothing is lost.
   console.error('email send failed: '+(e&&e.message?e.message:e));
-  await saveSubmission({file,b,submissionId,status:'failed',error:(e&&e.message?e.message:e)||'the mail server refused it'});
+  await updateSubmission(submissionId,{status:'failed',error:(e&&e.message?e.message:e)||'the mail server refused it'});
   res.status(502).json({error:'The application could not be emailed: '+((e&&e.message)||'the mail server refused it'),submissionId,stored:true});
  }
 }));
@@ -535,7 +571,29 @@ app.get('/api/admin/invite/:id',requireAdmin,wrap(async(req,res)=>{
 // Every application the PWA sends lands here before it is emailed, so a report
 // that never reached the office's inbox can still be pulled out afterwards. Read
 // with the admin key only — these are full application PDFs with an applicant's
-// personal data.
+// personal data — except for the signed link below, which is generated for one
+// report and sent only to the office.
+function sendSubmissionPdf(res,row){
+ res.setHeader('Content-Type','application/pdf');
+ res.setHeader('Content-Disposition','attachment; filename="'+String(row.filename||'application.pdf').replace(/["\\]/g,'_')+'"');
+ res.setHeader('Cache-Control','no-store');
+ res.setHeader('X-Robots-Tag','noindex, nofollow');
+ res.send(Buffer.from(row.content));
+}
+// A capability link for exactly one PDF, carried in the notification email when
+// the delivery provider cannot attach it. The signature is over the submission
+// id and expiry, so it cannot be edited to reach another applicant's report, and
+// it stops working when it expires or the signing secret is rotated. There is no
+// listing and no discovery here: without a valid token this is just a 401.
+app.get('/api/submissions/:id/pdf',wrap(async(req,res)=>{
+ if(!submissionDownloadAllowed(req.params.id,req.query.expires,req.query.signature)){
+  return res.status(401).json({error:'This download link is invalid or has expired'});
+ }
+ const row=await get('SELECT filename,content FROM submissions WHERE id=?',[req.params.id]);
+ if(!row) return res.status(404).json({error:'Submission not found'});
+ if(!row.content) return res.status(404).json({error:'The stored PDF is no longer available'});
+ sendSubmissionPdf(res,row);
+}));
 app.get('/api/admin/submissions',requireAdmin,wrap(async(req,res)=>{
  const rows=await all('SELECT id,filename,applicant,id_number,app_date,size,email_status,email_error,message_id,accepted,created_at FROM submissions ORDER BY created_at DESC LIMIT 500');
  res.json({ok:true,rows});
@@ -550,10 +608,7 @@ app.get('/api/admin/submissions/:id/pdf',requireAdmin,wrap(async(req,res)=>{
  if(!row) return res.status(404).json({error:'Submission not found'});
  const bytes=row.content;
  if(!bytes) return res.status(404).json({error:'The stored PDF is no longer available'});
- res.setHeader('Content-Type','application/pdf');
- res.setHeader('Content-Disposition','attachment; filename="'+String(row.filename||'application.pdf').replace(/["\\]/g,'_')+'"');
- res.setHeader('Cache-Control','no-store');
- res.send(Buffer.from(bytes));
+ sendSubmissionPdf(res,row);
 }));
 
 // Re-send a stored application that never made it out (email_status
@@ -563,7 +618,7 @@ app.get('/api/admin/submissions/:id/pdf',requireAdmin,wrap(async(req,res)=>{
 app.post('/api/admin/submissions/:id/resend',requireAdmin,wrap(async(req,res)=>{
  const row=await get('SELECT id,filename,applicant,id_number,app_date,reply_to,content FROM submissions WHERE id=?',[req.params.id]);
  if(!row) return res.status(404).json({error:'Submission not found'});
- if(!mailConfigured()) return res.status(503).json({error:'email_not_configured',message:'No delivery is configured yet (mailbox or Formspree), so nothing was emailed.'});
+ if(!mailConfigured()) return res.status(503).json({error:'email_not_configured',message:'No delivery is configured yet (mailbox, Brevo or Formspree), so nothing was emailed.'});
  const bytes=row.content;
  if(!bytes) return res.status(404).json({error:'The stored PDF is no longer available'});
  try{
@@ -574,6 +629,7 @@ app.post('/api/admin/submissions/:id/resend',requireAdmin,wrap(async(req,res)=>{
    idNumber:row.id_number,
    date:row.app_date,
    replyTo:row.reply_to,
+   downloadUrl:submissionDownloadUrl(row.id),
   });
   await run('UPDATE submissions SET email_status=?,email_error=NULL,message_id=?,accepted=? WHERE id=?',['sent',out.messageId||null,(out.accepted||[]).join(', '),row.id]);
   console.log(`Submission ${row.id} re-emailed (message ${out.messageId||'?'}, accepted by ${out.accepted.join(', ')||'nobody'})`);

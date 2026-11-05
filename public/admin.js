@@ -99,8 +99,9 @@
       const badge = document.createElement('span');
       badge.className = 'badge ' + (r.email_status || '');
       badge.textContent = {
+        pending: 'sending…',
         sent: 'emailed',
-        not_configured: 'not emailed (no mailbox)',
+        not_configured: 'not emailed (no delivery set up)',
         failed: 'not emailed (failed)',
       }[r.email_status] || (r.email_status || '');
       stateTd.appendChild(badge);
@@ -161,7 +162,7 @@
       return;
     }
     if (res.status === 401) { setStatus('That admin key was refused.', 'err'); lock(); return; }
-    if (res.status === 503) { setStatus('Delivery is not configured yet — set FORMSPREE_ENDPOINT (or SMTP) first.', 'err'); return; }
+    if (res.status === 503) { setStatus('Delivery is not configured yet — set BREVO_API_KEY, FORMSPREE_ENDPOINT or SMTP first.', 'err'); return; }
     if (!res.ok) { setStatus('Resend failed (HTTP ' + res.status + ').', 'err'); return; }
     setStatus('Resent — ' + (label || 'application') + ' has been emailed. Refreshing…', 'ok');
     loadSubmissions();

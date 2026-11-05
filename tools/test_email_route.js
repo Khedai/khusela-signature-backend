@@ -105,15 +105,52 @@ function startFakeSmtp() {
 // raw multipart body, and answer 200 JSON like Formspree does. The body is what
 // the test reads, so it can confirm the PDF and the applicant's details reached
 // the provider without any account, any internet or anything leaving the machine.
-function startFakeFormspree() {
+function startFakeFormspree(options) {
+  const opts = options || {};
   const requests = [];
   const server = http.createServer((req, res) => {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
-      requests.push({ method: req.method, url: req.url, headers: req.headers, body: Buffer.concat(chunks) });
+      const body = Buffer.concat(chunks);
+      requests.push({ method: req.method, url: req.url, headers: req.headers, body });
+      // A free Formspree form answers a multipart request that carries a file with
+      // this exact 400. The backend should retry without the file and send a link.
+      if (opts.rejectUploads && body.includes(Buffer.from('name="attachment"'))) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end('{"error":"File Uploads Not Permitted","errors":[{"message":"File Uploads Not Permitted"}]}');
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end('{"ok":true}');
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve({
+      port: server.address().port,
+      requests,
+      close: () => new Promise((r) => server.close(() => r())),
+    }));
+  });
+}
+
+
+// ── A fake Brevo endpoint ────────────────────────────────────────────────────
+// Enough of Brevo's transactional API: accept a JSON POST, remember the body and
+// the api-key header, and answer 201 like Brevo does. The test reads the body back
+// to confirm the PDF was base64-encoded into the attachment and that MAIL_TO was
+// the recipient — no account, no internet and nothing leaving the machine.
+function startFakeBrevo() {
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      let json = null;
+      try { json = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch (e) {}
+      requests.push({ method: req.method, url: req.url, headers: req.headers, json });
+      res.writeHead(201, { 'Content-Type': 'application/json' });
+      res.end('{"messageId":"<brevo-fake@example.test>"}');
     });
   });
   return new Promise((resolve) => {
@@ -203,6 +240,7 @@ const APP = { applicant: 'Thabo Mokoena', idNumber: '9001015800085', date: '2026
 // ── 1. A configured service, with a key set ───────────────────────────────────
 const smtp = await startFakeSmtp();
 let srv = null, limited = null, bare = null, fsp = null, formspree = null, notConfiguredId = null;
+let brevoSrv = null, brevo = null, fspFree = null, formspreeFree = null;
 const MAILBOX = {
   SMTP_HOST: '127.0.0.1', SMTP_PORT: String(smtp.port), SMTP_SECURE: 'false',
   SMTP_USER: SENDER, SMTP_PASS: 'fake-app-password',
@@ -218,6 +256,7 @@ try {
 
   const health = await (await fetch(srv.base + '/health')).json();
   check('/health reports the mailbox as configured', health.emailConfigured === true, JSON.stringify(health));
+  check('/health names SMTP as the ready path', health.emailPaths && health.emailPaths.smtp === true, JSON.stringify(health.emailPaths));
   check('/health reports the route as protected', health.emailProtected === true, JSON.stringify(health));
 
   // The office's report-bucket page is served at /admin and its script must parse
@@ -373,6 +412,68 @@ try {
   check('and its status moved to sent', afterResend.submission && afterResend.submission.email_status === 'sent', JSON.stringify(afterResend));
   await stop(fsp); fsp = null;
   await formspree.close(); formspree = null;
+
+  // ── 6. Brevo over HTTPS, with the PDF attached ──────────────────────────────
+  // The free Render path that still delivers an attachment. Brevo's endpoint is
+  // faked here, so the test reads the JSON body back and decodes the base64 file.
+  brevo = await startFakeBrevo();
+  brevoSrv = startServer(3915, {
+    SMTP_USER: '', SMTP_PASS: '', MAIL_TO: OFFICE, MAIL_FROM: '', SMTP_HOST: '',
+    BREVO_API_KEY: 'brevo-test-key', BREVO_SENDER: OFFICE,
+    BREVO_API_URL: 'http://127.0.0.1:' + brevo.port + '/v3/smtp/email',
+    EMAIL_RATE_LIMIT: '50',
+  });
+  check('the Brevo service starts', await waitReady(brevoSrv.base));
+  const brevoHealth = await (await fetch(brevoSrv.base + '/health')).json();
+  check('/health reports delivery configured via Brevo', brevoHealth.emailConfigured === true, JSON.stringify(brevoHealth));
+  check('/health names Brevo as the ready path', brevoHealth.emailPaths && brevoHealth.emailPaths.brevo === true, JSON.stringify(brevoHealth.emailPaths));
+  const viaBrevo = await postEmail(brevoSrv.base, { fields: APP, files: PDF_FILE });
+  check('an application is delivered through Brevo', viaBrevo.status === 200 && viaBrevo.json && viaBrevo.json.ok === true, 'HTTP ' + viaBrevo.status + ' ' + JSON.stringify(viaBrevo.json));
+  check('Brevo received exactly one post', brevo.requests.length === 1, brevo.requests.length + ' requests');
+  const brevoReq = brevo.requests[0] || { headers: {}, json: {} };
+  check('the Brevo key travelled in the api-key header', brevoReq.headers['api-key'] === 'brevo-test-key', String(brevoReq.headers['api-key']));
+  check('the office is the only recipient', Array.isArray(brevoReq.json.to) && brevoReq.json.to.length === 1 && brevoReq.json.to[0].email === OFFICE, JSON.stringify(brevoReq.json.to));
+  check('the sender is the verified Brevo sender', brevoReq.json.sender && brevoReq.json.sender.email === OFFICE, JSON.stringify(brevoReq.json.sender));
+  const brevoFile = brevoReq.json.attachment && brevoReq.json.attachment[0];
+  const brevoBytes = brevoFile ? Buffer.from(brevoFile.content, 'base64') : Buffer.alloc(0);
+  check('the PDF travelled base64-encoded in the attachment', brevoBytes.equals(PDF), brevoBytes.length + ' vs ' + PDF.length);
+  check('the Brevo delivery was stored as sent', !!viaBrevo.json && !!viaBrevo.json.submissionId && viaBrevo.json.stored === true, JSON.stringify(viaBrevo.json));
+  await stop(brevoSrv); brevoSrv = null;
+  await brevo.close(); brevo = null;
+
+  // ── 7. Formspree's free plan: file refused, secure link instead ─────────────
+  // This is the live 400 ("File Uploads Not Permitted") that stopped delivery.
+  // The backend must retry without the file and put a signed, expiring link in
+  // the email — and that link must download exactly this PDF, while a tampered
+  // one must not.
+  formspreeFree = await startFakeFormspree({ rejectUploads: true });
+  fspFree = startServer(3916, {
+    SMTP_USER: '', SMTP_PASS: '', MAIL_TO: '', MAIL_FROM: '', SMTP_HOST: '',
+    FORMSPREE_ENDPOINT: 'http://127.0.0.1:' + formspreeFree.port + '/f/testform',
+    EMAIL_RATE_LIMIT: '50',
+  });
+  check('the free-Formspree service starts', await waitReady(fspFree.base));
+  const viaLink = await postEmail(fspFree.base, { fields: APP, files: PDF_FILE });
+  check('a free Formspree form still delivers the application', viaLink.status === 200 && viaLink.json && viaLink.json.ok === true, 'HTTP ' + viaLink.status + ' ' + JSON.stringify(viaLink.json));
+  check('the response says it went as a link', !!viaLink.json && viaLink.json.linkOnly === true, JSON.stringify(viaLink.json));
+  check('Formspree was tried twice', formspreeFree.requests.length === 2, formspreeFree.requests.length + ' requests');
+  const retryBody = formspreeFree.requests[1] ? formspreeFree.requests[1].body.toString('utf8') : '';
+  check('the retry carried no attachment', !retryBody.includes('name="attachment"'), '');
+  check('the retry carried a secure download field', retryBody.includes('name="Download PDF"'), '');
+  const linkMatch = retryBody.match(/http:\/\/127\.0\.0\.1:3916\/api\/submissions\/[0-9a-f-]+\/pdf\?expires=\d+&signature=[A-Za-z0-9_-]+/);
+  check('the link points at the stored submission', !!linkMatch, retryBody.slice(0, 400));
+  if (linkMatch) {
+    const linked = await fetch(linkMatch[0]);
+    const linkedBytes = Buffer.from(await linked.arrayBuffer());
+    check('the signed link downloads the PDF byte-for-byte', linked.status === 200 && linkedBytes.equals(PDF), 'HTTP ' + linked.status + ', ' + linkedBytes.length + ' vs ' + PDF.length);
+    const tampered = new URL(linkMatch[0]);
+    tampered.searchParams.set('signature', 'not-the-signature');
+    const refused = await fetch(tampered);
+    check('a tampered link is refused', refused.status === 401, 'HTTP ' + refused.status);
+  }
+  check('the link delivery was stored as sent', !!viaLink.json && !!viaLink.json.submissionId && viaLink.json.stored === true, JSON.stringify(viaLink.json));
+  await stop(fspFree); fspFree = null;
+  await formspreeFree.close(); formspreeFree = null;
 } catch (e) {
   fail++;
   console.log('  FAIL exception -- ' + (e && e.message));
@@ -382,6 +483,10 @@ try {
   if (bare) await stop(bare);
   if (fsp) await stop(fsp);
   if (formspree) await formspree.close();
+  if (brevoSrv) await stop(brevoSrv);
+  if (brevo) await brevo.close();
+  if (fspFree) await stop(fspFree);
+  if (formspreeFree) await formspreeFree.close();
   await smtp.close();
   for (const f of [DB, DB + '-wal', DB + '-shm']) { try { fs.rmSync(f, { force: true }); } catch (e) {} }
   console.log('\n' + pass + ' passed, ' + fail + ' failed');

@@ -11,17 +11,21 @@ Production-oriented Node.js/Express backend for the Khusela application.
 - `GET /api/manage/:manageToken` — the consultant-side status of a signing request (`pending` / `signed` / `expired`), plus the signature URL when signed.
 - `GET /api/manage/:manageToken/signature` — the captured signature as a PNG.
 - `POST /api/email` — takes the finished application PDF from the PWA, **stores it
-  in the report bucket first**, then mails it to the office (`MAIL_TO`) from the
-  service's own mailbox. The recipient is owned by the server, so no caller can
-  name one, which is what makes a route the browser calls safe to expose. It
-  answers **503 `email_not_configured`** (with `stored:true`) while the mailbox is
-  unset — the PDF is still kept, and the PWA tells the consultant that rather than
-  falling back to its old path — see "Emailing the finished application" below.
+  in the report bucket first**, then mails it to the office (`MAIL_TO`) over SMTP,
+  Brevo or Formspree. The recipient is owned by the server, so no caller can name
+  one, which is what makes a route the browser calls safe to expose. It answers
+  **503 `email_not_configured`** (with `stored:true`) while no path is set — the
+  PDF is still kept, and the PWA tells the consultant that rather than falling
+  back to its old path — see "Emailing the finished application" below.
 - `GET /api/admin/submissions`, `GET /api/admin/submissions/:id` and
   `GET /api/admin/submissions/:id/pdf` — read the report bucket (the full list, one
   application's details, or the PDF itself), protected by `x-admin-key`.
 - `POST /api/admin/submissions/:id/resend` — re-send a backed-up application that
   never made it out, once a delivery path is configured (admin key).
+- `GET /api/submissions/:id/pdf?expires=…&signature=…` — one PDF through a signed,
+  expiring link. The link is generated only for the office notification email when
+  the delivery provider cannot attach the file; it is not listed anywhere and
+  cannot be edited to reach another submission.
 - Admin endpoints protected by `x-admin-key` for invitation/document/signature/audit
   status, and for the report bucket (see `GET /api/admin/submissions*` above).
 - SQLite through the libSQL/Turso client, with **everything** in the database: the
@@ -125,38 +129,49 @@ POST /api/email            multipart/form-data
   replyTo      the consultant's address for Reply-To, if there is one
 ```
 
-`200` returns `{ ok, id, accepted, rejected }`; `502` means the mail server refused
-and the app reports a failure; `503 email_not_configured` means no mailbox is set
-up here and the app should use its fallback. The recipient comes from `MAIL_TO`
-alone: an `applicant`/`to` field in the request can never redirect the mail, caller
-supplied strings are stripped of newlines and capped in length (so they cannot
-inject SMTP headers or pad the message), and `replyTo` only ever becomes a
-`Reply-To:` header. This is a route the browser calls, so it is rate limited per
-address (20 per 10 minutes; `EMAIL_RATE_LIMIT`, `EMAIL_RATE_WINDOW_MS`) and accepts
-only callers with an allowed `Origin` or from this machine until `EMAIL_API_KEY` is
-set and sent as `x-email-key` / `Authorization: Bearer`. `GET /health` reports the
-state as `emailConfigured` and `emailProtected`.
+`200` returns `{ ok, submissionId, stored:true, linkOnly? }`; `502` means every
+delivery path refused and the app reports a failure; `503 email_not_configured`
+means no path is set up here and the app says the PDF was kept instead. The
+recipient comes from `MAIL_TO` alone: an `applicant`/`to` field in the request can
+never redirect the mail, caller supplied strings are stripped of newlines and
+capped in length (so they cannot inject SMTP headers or pad the message), and
+`replyTo` only ever becomes a `Reply-To:` header. This is a route the browser
+calls, so it is rate limited per address (20 per 10 minutes; `EMAIL_RATE_LIMIT`,
+`EMAIL_RATE_WINDOW_MS`) and accepts only callers with an allowed `Origin` or from
+this machine until `EMAIL_API_KEY` is set and sent as `x-email-key` /
+`Authorization: Bearer`. `GET /health` reports the state as `emailConfigured` and
+`emailProtected`.
 
 ### Deliver over HTTPS on a host that blocks SMTP
 
 Configuring SMTP on a host that cannot reach an SMTP port makes this route fail
 in the worst possible way. The free tier of Render blocks outbound traffic to
 ports 25, 465 and 587 (changelog, 26 September 2025), so a send there times out
-after fifteen seconds and answers `502`. So the permanent path for a free instance
-is **Formspree over HTTPS**: set `FORMSPREE_ENDPOINT` to a form the office keeps
-at Formspree (it already uses Formspree elsewhere), and the application — PDF and
-all — is posted to it, with the recipient fixed on the form. Render's free tier
-allows ordinary HTTPS, so this works where SMTP cannot.
+after fifteen seconds and answers `502`. Render's free tier does allow ordinary
+HTTPS, so there are two HTTPS paths:
 
-Both paths are tried in order: SMTP first (a mailbox we control, for a paid host
-or a local `npm start`), Formspree second. With **neither** set, `/api/email`
-stores the PDF in the bucket and answers `503 email_not_configured` (with
-`stored:true`), and the office downloads it from `/admin` — nothing is lost and
-nothing is falsely reported as sent.
+1. **Brevo (recommended for a free instance) — the PDF stays attached.** Set
+   `BREVO_API_KEY` and `BREVO_SENDER` (an address verified in Brevo). The free
+   plan allows 300 messages a day and attachments up to 25 MB. Brevo receives the
+   PDF base64-encoded; the office gets a normal email with the file.
+2. **Formspree — the office gets a secure link on the free plan.** Set
+   `FORMSPREE_ENDPOINT` to a form the office keeps at Formspree. That service's
+   **free plan refuses file uploads** (HTTP 400 "File Uploads Not Permitted"), so
+   when that happens this service retries without the attachment and puts a
+   signed, expiring download link in the email. A paid Formspree plan carries the
+   attachment itself. `SUBMISSION_LINK_SECRET` (defaults to `ADMIN_API_KEY`) signs
+   the link and `SUBMISSION_LINK_DAYS` (default 30) sets its lifetime.
+
+The paths are tried in order: SMTP first (a mailbox we control, for a paid host
+or a local `npm start`), Brevo second, Formspree last. With **none** set,
+`/api/email` stores the PDF in the bucket and answers `503 email_not_configured`
+(with `stored:true`), and the office downloads it from `/admin` — nothing is lost
+and nothing is falsely reported as sent.
 
 The tell is `GET /health`. `emailConfigured: true` on a host whose SMTP ports are
-blocked but with no `FORMSPREE_ENDPOINT` means every send will time out; set
-`FORMSPREE_ENDPOINT` (or move to a paid instance / VPS and set the SMTP variables).
+blocked but with no `BREVO_API_KEY`/`FORMSPREE_ENDPOINT` means every send will
+time out; set one of the HTTPS paths (or move to a paid instance / VPS and set
+the SMTP variables).
 
 A backed-up application can be pushed out once delivery is working — the "fallback
 after the backup" — with `POST /api/admin/submissions/:id/resend` (admin key).

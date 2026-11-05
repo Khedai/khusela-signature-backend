@@ -94,22 +94,25 @@ services:
         generateValue: true
       # ── Emailing the finished application ──────────────────────────────────
       # POST /api/email stores the PDF in the report bucket, then mails it to the
-      # office. Two delivery paths, tried in order — see mailer.js for why.
+      # office. Three delivery paths, tried in order — see mailer.js for why.
       #
       # ONLY set the SMTP variables below where outbound SMTP actually works. The
       # free tier of Render blocks ports 25, 465 and 587, so a send from a free
-      # instance times out and answers 502. On a free instance set FORMSPREE_ENDPOINT
-      # instead (HTTPS, which free Render allows): the office keeps a form at
-      # Formspree — it already uses Formspree elsewhere — and the application is
-      # posted to it, PDF and all, with the recipient fixed on the form. With NEITHER
-      # set, the route stores the PDF and answers 503 email_not_configured, and the
-      # office downloads it from the bucket. /health says which state you are in as
-      # emailConfigured.
+      # instance times out and answers 502. On a free instance use BREVO_API_KEY +
+      # BREVO_SENDER (HTTPS, attachment, 300 free messages/day) or FORMSPREE_ENDPOINT
+      # (HTTPS; the free plan has no file uploads, so the email carries a secure
+      # expiring download link instead of the attachment). With NONE set, the route
+      # stores the PDF and answers 503 email_not_configured, and the office downloads
+      # it from the bucket. /health says which state you are in as emailConfigured.
       #
       # IMPORTANT: Render applies these to a service it creates from this
       # blueprint. It does NOT push a blueprint change into a service that already
       # exists — an existing service needs the same keys added by hand in
       # Dashboard > Environment.
+      # - key: BREVO_API_KEY
+      #   sync: false
+      # - key: BREVO_SENDER
+      #   value: khuselamanagement@gmail.com
       # - key: FORMSPREE_ENDPOINT
       #   value: https://formspree.io/f/your-form-id
       # - key: MAIL_TO
@@ -131,3 +134,9 @@ services:
       # sender is left at its default (the authenticated account).
       # - key: MAX_EMAIL_MB
       #   value: "20"
+      # The secure links put in Formspree emails default to ADMIN_API_KEY and last
+      # 30 days; both can be changed here.
+      # - key: SUBMISSION_LINK_SECRET
+      #   sync: false
+      # - key: SUBMISSION_LINK_DAYS
+      #   value: "30"
