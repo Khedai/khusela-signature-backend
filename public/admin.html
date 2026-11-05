@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Khusela — Report Bucket (Admin)</title>
+<style>
+  body{font-family:Arial,sans-serif;background:#f5f7f7;margin:0;color:#17352f}
+  .wrap{max-width:960px;margin:24px auto;padding:0 16px}
+  h1{color:#1f6b5a;font-size:22px}
+  .hint{color:#666;font-size:13px;margin:6px 0 16px}
+  .gate{background:#fff;padding:20px;border-radius:12px;box-shadow:0 3px 15px #0001;max-width:520px}
+  .row{margin:14px 0}
+  label{font-weight:bold;font-size:14px}
+  input[type=password]{width:100%;padding:10px;font-size:15px;border:1px solid #bbb;border-radius:8px;box-sizing:border-box;margin-top:6px}
+  button{padding:10px 16px;border:0;border-radius:8px;cursor:pointer;font-size:14px}
+  .primary{background:#1f6b5a;color:#fff}
+  .secondary{background:#ddd;color:#222}
+  .status{margin:12px 0;font-weight:bold}
+  .status.err{color:#b00020}
+  .status.ok{color:#1f6b5a}
+  .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:6px}
+  table{width:100%;border-collapse:collapse;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 3px 15px #0001}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #eee;font-size:14px}
+  th{background:#1f6b5a;color:#fff}
+  .badge{padding:3px 8px;border-radius:999px;font-size:12px;font-weight:bold;white-space:nowrap}
+  .badge.sent{background:#d7f3e6;color:#1f6b5a}
+  .badge.not_configured,.badge.failed{background:#ffe0e0;color:#b00020}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Khusela — Report Bucket (Admin)</h1>
+  <div class="hint">Every application submitted from the Khusela ITC app is stored here before it is emailed. Downloading anything needs the office admin key.</div>
+
+  <div class="gate" id="gated" hidden>
+    <div class="row"><label for="key">Admin key</label><input type="password" id="key" autocomplete="off" placeholder="Paste the ADMIN_API_KEY"></div>
+    <div class="row"><button class="primary" id="unlock">Unlock</button></div>
+  </div>
+
+  <div class="status" id="status"></div>
+
+  <div id="listWrap" hidden>
+    <div class="toolbar">
+      <button class="secondary" id="refresh">Refresh</button>
+      <button class="secondary" id="lock">Lock</button>
+    </div>
+    <table>
+      <thead><tr><th>Applicant</th><th>ID number</th><th>Submitted</th><th>Size</th><th>Email</th><th></th></tr></thead>
+      <tbody id="listBody"></tbody>
+    </table>
+  </div>
+</div>
+<script src="/admin.js"></script>
+</body>
+</html>

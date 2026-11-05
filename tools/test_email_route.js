@@ -13,6 +13,7 @@
 // answering 503 so the app can fall back.
 import { spawn } from 'child_process';
 import fs from 'fs';
+import http from 'http';
 import net from 'net';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -99,6 +100,32 @@ function startFakeSmtp() {
 }
 
 
+// ── A fake Formspree endpoint ────────────────────────────────────────────────
+// Enough of Formspree for the HTTPS delivery path: accept any POST, remember the
+// raw multipart body, and answer 200 JSON like Formspree does. The body is what
+// the test reads, so it can confirm the PDF and the applicant's details reached
+// the provider without any account, any internet or anything leaving the machine.
+function startFakeFormspree() {
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      requests.push({ method: req.method, url: req.url, headers: req.headers, body: Buffer.concat(chunks) });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve({
+      port: server.address().port,
+      requests,
+      close: () => new Promise((r) => server.close(() => r())),
+    }));
+  });
+}
+
+
 function startServer(port, extra) {
   const child = spawn(process.execPath, ['server.js'], {
     cwd: ROOT,
@@ -175,7 +202,7 @@ const APP = { applicant: 'Thabo Mokoena', idNumber: '9001015800085', date: '2026
 
 // ── 1. A configured service, with a key set ───────────────────────────────────
 const smtp = await startFakeSmtp();
-let srv = null, limited = null, bare = null;
+let srv = null, limited = null, bare = null, fsp = null, formspree = null, notConfiguredId = null;
 const MAILBOX = {
   SMTP_HOST: '127.0.0.1', SMTP_PORT: String(smtp.port), SMTP_SECURE: 'false',
   SMTP_USER: SENDER, SMTP_PASS: 'fake-app-password',
@@ -192,6 +219,18 @@ try {
   const health = await (await fetch(srv.base + '/health')).json();
   check('/health reports the mailbox as configured', health.emailConfigured === true, JSON.stringify(health));
   check('/health reports the route as protected', health.emailProtected === true, JSON.stringify(health));
+
+  // The office's report-bucket page is served at /admin and its script must parse
+  // (helmet's CSP refuses inline scripts, so admin.js is a separate file, exactly
+  // like the signing page).
+  const adminPage = await fetch(srv.base + '/admin');
+  const adminPageText = await adminPage.text();
+  check('/admin serves the report-bucket page', adminPage.status === 200 && adminPageText.includes('Report Bucket'), 'HTTP ' + adminPage.status);
+  const adminJs = await fetch(srv.base + '/admin.js');
+  const adminJsText = await adminJs.text();
+  let adminJsParses = true;
+  try { new Function(adminJsText); } catch (e) { adminJsParses = false; }
+  check('/admin.js is valid JavaScript the browser will parse', adminJs.status === 200 && adminJsParses, 'HTTP ' + adminJs.status);
 
   const noKey = await postEmail(srv.base, { fields: APP, files: PDF_FILE });
   check('a caller with no key is refused', noKey.status === 401, 'HTTP ' + noKey.status + ' ' + JSON.stringify(noKey.json));
@@ -222,6 +261,7 @@ try {
     files: PDF_FILE,
   });
   check('a real application is accepted', sent.status === 200 && sent.json && sent.json.ok === true, 'HTTP ' + sent.status + ' ' + JSON.stringify(sent.json));
+  check('the response names the stored submission', !!sent.json && !!sent.json.submissionId && sent.json.stored === true, JSON.stringify(sent.json));
   check('exactly one message was delivered', smtp.sessions.length === 1, smtp.sessions.length + ' messages');
 
   const session = smtp.sessions[0] || { to: [], data: '', from: '' };
@@ -251,6 +291,14 @@ try {
     attached.length + ' bytes arrived, ' + PDF.length + ' were sent');
   check('the route logged the delivery', srv.log.join('').includes('Application emailed'), '');
 
+  // The same application is also in the bucket: recoverable from the admin
+  // endpoints whatever happened to the mailbox after this.
+  const sentSub = await (await fetch(srv.base + '/api/admin/submissions/' + sent.json.submissionId, { headers: { 'x-admin-key': 'test-key' } })).json();
+  check('the emailed application was stored with status sent', sentSub.ok === true && sentSub.submission && sentSub.submission.email_status === 'sent', JSON.stringify(sentSub));
+  const sentPdf = await fetch(srv.base + '/api/admin/submissions/' + sent.json.submissionId + '/pdf', { headers: { 'x-admin-key': 'test-key' } });
+  const sentBytes = Buffer.from(await sentPdf.arrayBuffer());
+  check('the stored PDF downloads byte-for-byte', sentBytes.equals(PDF), sentBytes.length + ' vs ' + PDF.length);
+
   // ── 3. The limiter ─────────────────────────────────────────────────────────
   // Its own server, because the counter is per address and every request above
   // came from this machine.
@@ -277,8 +325,54 @@ try {
     'HTTP ' + unconfigured.status + ' ' + JSON.stringify(unconfigured.json));
   check('and says what is missing', !!unconfigured.json && /mailbox/i.test(unconfigured.json.message || ''), JSON.stringify(unconfigured.json));
   check('startup announced that state rather than leaving it to be discovered',
-    bare.log.join('').includes('no mailbox is configured'), bare.log.join('').slice(0, 200));
+    bare.log.join('').includes('no delivery is configured'), bare.log.join('').slice(0, 200));
+
+  // The application is NOT lost on a service with no mailbox: it is stored in the
+  // bucket and downloadable through the admin endpoints, which is what turns
+  // "nothing arrived and there was no copy" into "the email did not go, but the
+  // PDF is recoverable".
+  const storedList = await (await fetch(bare.base + '/api/admin/submissions', { headers: { 'x-admin-key': 'test-key' } })).json();
+  check('the unconfigured application was stored in the bucket anyway', storedList.ok === true && Array.isArray(storedList.rows) && storedList.rows.some((r) => r.email_status === 'not_configured'), JSON.stringify(storedList));
+  const sid = storedList.rows.find((r) => r.email_status === 'not_configured').id;
+  notConfiguredId = sid;
+  const storedPdf = await fetch(bare.base + '/api/admin/submissions/' + sid + '/pdf', { headers: { 'x-admin-key': 'test-key' } });
+  const storedBytes = Buffer.from(await storedPdf.arrayBuffer());
+  check('and the stored PDF downloads byte-for-byte', storedBytes.equals(PDF), storedBytes.length + ' vs ' + PDF.length);
   await stop(bare); bare = null;
+
+  // ── 5. Formspree over HTTPS (the free-instance path) and resend ─────────────
+  // Render's free tier cannot reach SMTP ports, so a free instance delivers over
+  // HTTPS instead. Formspree is pointed at the fake endpoint below; the send is
+  // the same POST /api/email, and the fake Formspree records the multipart body so
+  // the test can read the PDF and the applicant's details back.
+  formspree = await startFakeFormspree();
+  fsp = startServer(3914, {
+    SMTP_USER: '', SMTP_PASS: '', MAIL_TO: '', MAIL_FROM: '', SMTP_HOST: '',
+    FORMSPREE_ENDPOINT: 'http://127.0.0.1:' + formspree.port + '/f/testform',
+    EMAIL_RATE_LIMIT: '50',
+  });
+  check('the Formspree service starts', await waitReady(fsp.base));
+  const fspHealth = await (await fetch(fsp.base + '/health')).json();
+  check('/health reports delivery configured via Formspree', fspHealth.emailConfigured === true, JSON.stringify(fspHealth));
+
+  const viaFs = await postEmail(fsp.base, { fields: APP, files: PDF_FILE });
+  check('an application is delivered through Formspree', viaFs.status === 200 && viaFs.json && viaFs.json.ok === true, 'HTTP ' + viaFs.status + ' ' + JSON.stringify(viaFs.json));
+  check('Formspree received exactly one post', formspree.requests.length === 1, formspree.requests.length + ' requests');
+  const fsBody = formspree.requests[0] ? formspree.requests[0].body : Buffer.alloc(0);
+  check('and the PDF bytes reached Formspree', fsBody.includes(PDF), '');
+  check('and the applicant reached Formspree', fsBody.includes(Buffer.from('Thabo Mokoena')), '');
+  check('and the attachment field carried the file', fsBody.includes(Buffer.from('name="attachment"')), '');
+  check('and the stored submission was marked sent', !!viaFs.json && !!viaFs.json.submissionId && viaFs.json.stored === true, JSON.stringify(viaFs.json));
+
+  // The backed-up report from case 4 (no delivery at the time) can now be pushed
+  // out of the bucket — the "fallback after the backup".
+  const re = await fetch(fsp.base + '/api/admin/submissions/' + notConfiguredId + '/resend', { method: 'POST', headers: { 'x-admin-key': 'test-key' } });
+  const reJson = await re.json();
+  check('a backed-up report can be resent from the bucket', re.status === 200 && reJson.ok === true, 'HTTP ' + re.status + ' ' + JSON.stringify(reJson));
+  const afterResend = await (await fetch(fsp.base + '/api/admin/submissions/' + notConfiguredId, { headers: { 'x-admin-key': 'test-key' } })).json();
+  check('and its status moved to sent', afterResend.submission && afterResend.submission.email_status === 'sent', JSON.stringify(afterResend));
+  await stop(fsp); fsp = null;
+  await formspree.close(); formspree = null;
 } catch (e) {
   fail++;
   console.log('  FAIL exception -- ' + (e && e.message));
@@ -286,6 +380,8 @@ try {
   if (srv) await stop(srv);
   if (limited) await stop(limited);
   if (bare) await stop(bare);
+  if (fsp) await stop(fsp);
+  if (formspree) await formspree.close();
   await smtp.close();
   for (const f of [DB, DB + '-wal', DB + '-shm']) { try { fs.rmSync(f, { force: true }); } catch (e) {} }
   console.log('\n' + pass + ' passed, ' + fail + ' failed');

@@ -32,9 +32,8 @@ services:
     # Frankfurt is the closest Render region to South Africa (frankfurt, oregon,
     # ohio, virginia, singapore).
     region: frankfurt
-    # The free instance sleeps after about 15 minutes idle and takes up to a minute
-    # to wake, so the first page load after a quiet spell is slow. That delay is the
-    # whole cost of the free plan; the data itself is unaffected while it sleeps.
+    # Free instances sleep after inactivity and can take about a minute to wake.
+    # The data remains safe in Turso while the service is asleep.
     plan: free
     buildCommand: npm ci
     startCommand: npm start
@@ -94,22 +93,25 @@ services:
       - key: ADMIN_API_KEY
         generateValue: true
       # ── Emailing the finished application ──────────────────────────────────
-      # POST /api/email mails the PDF the PWA renders to MAIL_TO, from this
-      # service's own mailbox, instead of the PWA handing it to a third-party
-      # form-to-email service (see mailer.js for why that had to stop).
+      # POST /api/email stores the PDF in the report bucket, then mails it to the
+      # office. Two delivery paths, tried in order — see mailer.js for why.
       #
-      # ONLY set the mailbox variables below where outbound SMTP actually works.
-      # The free tier of Render blocks ports 25, 465 and 587, so a send from a
-      # free instance times out and answers 502 — which the app does NOT fall back
-      # from, because 502 also covers real faults such as an oversized PDF. With
-      # these unset, the route answers 503 email_not_configured and the app falls
-      # back to the old path, which is what a free service should do. /health
-      # says which state you are in as emailConfigured.
+      # ONLY set the SMTP variables below where outbound SMTP actually works. The
+      # free tier of Render blocks ports 25, 465 and 587, so a send from a free
+      # instance times out and answers 502. On a free instance set FORMSPREE_ENDPOINT
+      # instead (HTTPS, which free Render allows): the office keeps a form at
+      # Formspree — it already uses Formspree elsewhere — and the application is
+      # posted to it, PDF and all, with the recipient fixed on the form. With NEITHER
+      # set, the route stores the PDF and answers 503 email_not_configured, and the
+      # office downloads it from the bucket. /health says which state you are in as
+      # emailConfigured.
       #
       # IMPORTANT: Render applies these to a service it creates from this
       # blueprint. It does NOT push a blueprint change into a service that already
       # exists — an existing service needs the same keys added by hand in
       # Dashboard > Environment.
+      # - key: FORMSPREE_ENDPOINT
+      #   value: https://formspree.io/f/your-form-id
       # - key: MAIL_TO
       #   value: khuselamanagement@gmail.com
       # - key: SMTP_HOST

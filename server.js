@@ -82,6 +82,17 @@ const SCHEMA=[
  id INTEGER PRIMARY KEY AUTOINCREMENT, invitation_id TEXT, event TEXT NOT NULL,
  created_at TEXT NOT NULL, ip TEXT, user_agent TEXT, meta TEXT
 )`,
+// Every application the PWA submits is stored here — the "bucket" — before it is
+// emailed, so a report that never reached the office's inbox (no mailbox, a
+// refused message, a missed spam folder) can still be pulled out afterwards. The
+// PDF itself is the `content` BLOB, exactly as the signature images and uploaded
+// documents already are, so it survives a redeploy the same way.
+`CREATE TABLE IF NOT EXISTS submissions(
+ id TEXT PRIMARY KEY, filename TEXT NOT NULL, applicant TEXT, id_number TEXT,
+ app_date TEXT, reply_to TEXT, size INTEGER NOT NULL, content BLOB NOT NULL,
+ email_status TEXT NOT NULL, email_error TEXT, message_id TEXT, accepted TEXT,
+ created_at TEXT NOT NULL
+)`,
 ];
 // Lightweight migrations: CREATE TABLE IF NOT EXISTS never adds a column to a
 // database that already exists, so additive columns are applied here.
@@ -234,6 +245,12 @@ app.get('/health',(req,res)=>res.json({ok:true,service:'khusela-digital-signatur
 // link is reported by the page itself out of the API call below.
 app.get('/sign/:token',(req,res)=>res.sendFile(path.join(__dirname,'public','sign.html')));
 
+// The office's report-bucket page: it lists the submitted applications and
+// downloads their PDFs, all gated by the ADMIN_API_KEY in the browser (see
+// public/admin.js). Served at a clean path, but it is the same static file
+// express.static already exposes as /admin.html.
+app.get('/admin',(req,res)=>res.sendFile(path.join(__dirname,'public','admin.html')));
+
 // Matches the existing Khusela HTML's Generate Signing Link call.
 app.post('/api/invite',inviteRateLimit,wrap(async(req,res)=>{
  if(!inviteAuthorized(req)) return res.status(401).json({error:'This endpoint issues Khusela signing links to the Khusela application only'});
@@ -274,7 +291,7 @@ app.post('/api/invite',inviteRateLimit,wrap(async(req,res)=>{
 // this machine is accepted. /health reports both states, as emailConfigured and
 // emailProtected, so neither is a guess.
 const EMAIL_KEY=process.env.EMAIL_API_KEY||'';
-if(!mailConfigured()) console.warn('WARNING: no mailbox is configured (MAIL_TO, SMTP_USER, SMTP_PASS), so POST /api/email answers 503 and the app keeps using its own email service. Set them to send applications from this service.');
+if(!mailConfigured()) console.warn('WARNING: no delivery is configured (SMTP_* + MAIL_TO, or FORMSPREE_ENDPOINT), so POST /api/email answers 503 after storing the PDF in the bucket. Set one of them to send applications from this service.');
 function presentedEmailKey(req){
  const header=req.get('x-email-key');
  if(header) return header;
@@ -304,12 +321,13 @@ function emailRateLimit(req,res,next){
  res.setHeader('Retry-After',String(wait));
  res.status(429).json({error:`Too many applications have been emailed from this address. Please wait ${Math.ceil(wait/60)} minute(s) and try again.`});
 }
-// The gate runs BEFORE multer, so a caller with no right to be here — or a
-// service with no mailbox configured yet — is answered without this process
-// buffering 20 MB of PDF it is never going to use.
+// The gate runs BEFORE multer, so a caller with no right to be here is answered
+// without this process buffering 20 MB of PDF it is never going to use. The
+// mailbox check is deliberately NOT here any more: even when no mailbox is
+// configured the PDF is captured and stored in the submissions "bucket", so an
+// application is never lost on its way to a mailbox that turns out to be missing.
 function emailGate(req,res,next){
  if(!emailAuthorized(req)) return res.status(401).json({error:'This endpoint emails Khusela applications to the Khusela office only'});
- if(!mailConfigured()) return res.status(503).json({error:'email_not_configured',message:'This service has no mailbox configured yet, so the application was not emailed. Try again once the office mailbox has been set up on it.'});
  next();
 }
 // One PDF and nothing else: that is what this route exists to carry.
@@ -322,10 +340,37 @@ const emailUpload=multer({
  },
 });
 
+// Every submitted application is written into the submissions table BEFORE the
+// email is attempted, and the row is then updated with the outcome. That is the
+// "bucket": whatever the mailbox does, the PDF is recoverable afterwards through
+// the admin endpoints below. The email_status on the row says whether it also
+// went out, so the office can tell a backed-up-but-not-emailed report from one
+// that arrived in the inbox.
+function cleanSubmissionText(v,n){return String(v==null?'':v).replace(/[\r\n]+/g,' ').trim().slice(0,n);}
+async function saveSubmission({file,b,submissionId,status,error,messageId,accepted}){
+ await run(
+  `INSERT INTO submissions(id,filename,applicant,id_number,app_date,reply_to,size,content,email_status,email_error,message_id,accepted,created_at)
+   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  [submissionId,cleanSubmissionText(file.originalname,200),cleanSubmissionText(b.applicant,120),cleanSubmissionText(b.idNumber,40),cleanSubmissionText(b.date,40),cleanSubmissionText(b.replyTo,200),file.size,file.buffer,status,error||null,messageId||null,accepted||null,now()],
+ );
+}
+
 app.post('/api/email',emailRateLimit,emailGate,emailUpload.single('attachment'),wrap(async(req,res)=>{
  const file=req.file;
  if(!file) return res.status(400).json({error:'The application PDF is missing from the request'});
  const b=req.body||{};
+ const submissionId=id();
+ // The application is stored first, whatever the mailbox does with it. If the
+ // database is down there is nothing to store and nothing to email, so the error
+ // handler answers that failure rather than a route pretending it kept a copy.
+ if(!mailConfigured()){
+  await saveSubmission({file,b,submissionId,status:'not_configured'});
+  // Still the same 503 the PWA reads as "no mailbox here", now carrying the proof
+  // that the PDF was kept: submissionId + stored. The app uses that to say the
+  // application was saved to the office's bucket rather than fall back to a
+  // form-to-email service that cannot confirm delivery.
+  return res.status(503).json({error:'email_not_configured',message:'No delivery is configured yet (mailbox or Formspree), so the application was not emailed — but it has been saved to the office\'s report bucket.',submissionId,stored:true});
+ }
  try{
   const out=await sendApplication({
    filename:file.originalname,
@@ -335,19 +380,22 @@ app.post('/api/email',emailRateLimit,emailGate,emailUpload.single('attachment'),
    date:b.date,
    replyTo:b.replyTo,
   });
+  await saveSubmission({file,b,submissionId,status:'sent',messageId:out.messageId||null,accepted:(out.accepted||[]).join(', ')});
   // One line per application that went out, so the log answers "did it arrive?"
   // without a mailbox. The applicant's own address is deliberately not in it —
   // the message headers carry that and this log is not the place for it.
-  console.log(`Application emailed (${(file.size/1048576).toFixed(1)} MB, message ${out.messageId||'?'}, accepted by ${out.accepted.join(', ')||'nobody'})`);
-  res.json({ok:true,messageId:out.messageId,accepted:out.accepted.length>0});
+  console.log(`Application emailed (${(file.size/1048576).toFixed(1)} MB, message ${out.messageId||'?'}, accepted by ${out.accepted.join(', ')||'nobody'}) — saved as submission ${submissionId}`);
+  res.json({ok:true,messageId:out.messageId,accepted:out.accepted.length>0,submissionId,stored:true});
  }catch(e){
   // The mailbox refused the message or could not be reached. That is neither the
   // caller's mistake nor a fault in this process, so it is a 502 carrying the
   // reason: a consultant needs to know the application did not go, and that
   // retrying is worth it. A wrong password shows up here, which is the whole
-  // point of testing it before the office depends on it.
+  // point of testing it before the office depends on it. The PDF is still in the
+  // bucket, so nothing is lost.
   console.error('email send failed: '+(e&&e.message?e.message:e));
-  res.status(502).json({error:'The application could not be emailed: '+((e&&e.message)||'the mail server refused it')});
+  await saveSubmission({file,b,submissionId,status:'failed',error:(e&&e.message?e.message:e)||'the mail server refused it'});
+  res.status(502).json({error:'The application could not be emailed: '+((e&&e.message)||'the mail server refused it'),submissionId,stored:true});
  }
 }));
 
@@ -481,6 +529,60 @@ app.get('/api/admin/invite/:id',requireAdmin,wrap(async(req,res)=>{
  const sig=await get('SELECT id,signed_at,ip,user_agent FROM signatures WHERE invitation_id=?',[inv.id]);
  const auditRows=await all('SELECT event,created_at,ip,meta FROM audit_log WHERE invitation_id=? ORDER BY created_at',[inv.id]);
  res.json({ok:true,invitation:inv,documents:docs,signature:sig,audit:auditRows});
+}));
+
+// ── The submissions "bucket" ─────────────────────────────────────────────────
+// Every application the PWA sends lands here before it is emailed, so a report
+// that never reached the office's inbox can still be pulled out afterwards. Read
+// with the admin key only — these are full application PDFs with an applicant's
+// personal data.
+app.get('/api/admin/submissions',requireAdmin,wrap(async(req,res)=>{
+ const rows=await all('SELECT id,filename,applicant,id_number,app_date,size,email_status,email_error,message_id,accepted,created_at FROM submissions ORDER BY created_at DESC LIMIT 500');
+ res.json({ok:true,rows});
+}));
+app.get('/api/admin/submissions/:id',requireAdmin,wrap(async(req,res)=>{
+ const row=await get('SELECT id,filename,applicant,id_number,app_date,reply_to,size,email_status,email_error,message_id,accepted,created_at FROM submissions WHERE id=?',[req.params.id]);
+ if(!row) return res.status(404).json({error:'Submission not found'});
+ res.json({ok:true,submission:row});
+}));
+app.get('/api/admin/submissions/:id/pdf',requireAdmin,wrap(async(req,res)=>{
+ const row=await get('SELECT filename,content FROM submissions WHERE id=?',[req.params.id]);
+ if(!row) return res.status(404).json({error:'Submission not found'});
+ const bytes=row.content;
+ if(!bytes) return res.status(404).json({error:'The stored PDF is no longer available'});
+ res.setHeader('Content-Type','application/pdf');
+ res.setHeader('Content-Disposition','attachment; filename="'+String(row.filename||'application.pdf').replace(/["\\]/g,'_')+'"');
+ res.setHeader('Cache-Control','no-store');
+ res.send(Buffer.from(bytes));
+}));
+
+// Re-send a stored application that never made it out (email_status
+// not_configured / failed). This is the "fallback after the backup": once a
+// delivery path is configured, the office pushes a backed-up report out from
+// here instead of asking the consultant to resubmit from the PWA.
+app.post('/api/admin/submissions/:id/resend',requireAdmin,wrap(async(req,res)=>{
+ const row=await get('SELECT id,filename,applicant,id_number,app_date,reply_to,content FROM submissions WHERE id=?',[req.params.id]);
+ if(!row) return res.status(404).json({error:'Submission not found'});
+ if(!mailConfigured()) return res.status(503).json({error:'email_not_configured',message:'No delivery is configured yet (mailbox or Formspree), so nothing was emailed.'});
+ const bytes=row.content;
+ if(!bytes) return res.status(404).json({error:'The stored PDF is no longer available'});
+ try{
+  const out=await sendApplication({
+   filename:row.filename,
+   pdf:Buffer.from(bytes),
+   applicant:row.applicant,
+   idNumber:row.id_number,
+   date:row.app_date,
+   replyTo:row.reply_to,
+  });
+  await run('UPDATE submissions SET email_status=?,email_error=NULL,message_id=?,accepted=? WHERE id=?',['sent',out.messageId||null,(out.accepted||[]).join(', '),row.id]);
+  console.log(`Submission ${row.id} re-emailed (message ${out.messageId||'?'}, accepted by ${out.accepted.join(', ')||'nobody'})`);
+  res.json({ok:true,submissionId:row.id,accepted:out.accepted.length>0});
+ }catch(e){
+  console.error('resend failed: '+(e&&e.message?e.message:e));
+  await run('UPDATE submissions SET email_status=?,email_error=? WHERE id=?',['failed',(e&&e.message?e.message:e)||'the mail server refused it',row.id]);
+  res.status(502).json({error:'The application could not be emailed: '+((e&&e.message)||'the mail server refused it')});
+ }
 }));
 
 // Whatever a route did not answer itself is unexpected, and now that every route

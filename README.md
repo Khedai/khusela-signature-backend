@@ -10,13 +10,20 @@ Production-oriented Node.js/Express backend for the Khusela application.
 - `POST /api/sign/:token/complete` — stores the drawn signature, timestamp, IP and user-agent and permanently consumes the link.
 - `GET /api/manage/:manageToken` — the consultant-side status of a signing request (`pending` / `signed` / `expired`), plus the signature URL when signed.
 - `GET /api/manage/:manageToken/signature` — the captured signature as a PNG.
-- `POST /api/email` — takes the finished application PDF from the PWA and mails it
-  to the office (`MAIL_TO`) from the service's own mailbox. The recipient is owned
-  by the server, so no caller can name one, which is what makes a route the browser
-  calls safe to expose. It answers **503 `email_not_configured`** while the mailbox
-  is unset, which is the signal the PWA uses to fall back to its old path — see
-  "Emailing the finished application" below.
-- Admin endpoints protected by `x-admin-key` for invitation/document/signature/audit status.
+- `POST /api/email` — takes the finished application PDF from the PWA, **stores it
+  in the report bucket first**, then mails it to the office (`MAIL_TO`) from the
+  service's own mailbox. The recipient is owned by the server, so no caller can
+  name one, which is what makes a route the browser calls safe to expose. It
+  answers **503 `email_not_configured`** (with `stored:true`) while the mailbox is
+  unset — the PDF is still kept, and the PWA tells the consultant that rather than
+  falling back to its old path — see "Emailing the finished application" below.
+- `GET /api/admin/submissions`, `GET /api/admin/submissions/:id` and
+  `GET /api/admin/submissions/:id/pdf` — read the report bucket (the full list, one
+  application's details, or the PDF itself), protected by `x-admin-key`.
+- `POST /api/admin/submissions/:id/resend` — re-send a backed-up application that
+  never made it out, once a delivery path is configured (admin key).
+- Admin endpoints protected by `x-admin-key` for invitation/document/signature/audit
+  status, and for the report bucket (see `GET /api/admin/submissions*` above).
 - SQLite through the libSQL/Turso client, with **everything** in the database: the
   invitations, the audit log, the uploaded documents and the signature images
   themselves, the last two as BLOB columns. Nothing is written to the host's disk,
@@ -92,7 +99,16 @@ never be sent, nor mistake a signed pad for a form that still has to go.
 
 The PWA renders the application to a PDF and hands it to the backend, which mails
 it to the office. `mailer.js` holds the whole arrangement and `server.js` only
-guards the route.
+guards the route. Before it mails anything, the route writes the PDF into the
+`submissions` table — the **report bucket** — so an application is never lost when
+the email cannot go out (no mailbox, a refused message, a missed spam folder).
+
+**Downloading the bucket.** The office reads it at the admin page
+`https://<service>/admin` — a list of every submission (newest first, with whether
+it was emailed) and a **Download PDF** button per row. The page is useless without
+the `ADMIN_API_KEY`, so a consultant's shared PWA screen can never open it. The
+same data is available as `GET /api/admin/submissions*` with the
+`x-admin-key: <ADMIN_API_KEY>` header.
 
 This replaced a third-party form-to-email service (FormSubmit) that the PWA posted
 the PDF to directly. On 2026-09-30 that service answered every submission with a
@@ -121,26 +137,29 @@ only callers with an allowed `Origin` or from this machine until `EMAIL_API_KEY`
 set and sent as `x-email-key` / `Authorization: Bearer`. `GET /health` reports the
 state as `emailConfigured` and `emailProtected`.
 
-### Leave the mailbox settings unset on a host that blocks SMTP
+### Deliver over HTTPS on a host that blocks SMTP
 
 Configuring SMTP on a host that cannot reach an SMTP port makes this route fail
 in the worst possible way. The free tier of Render blocks outbound traffic to
 ports 25, 465 and 587 (changelog, 26 September 2025), so a send there times out
-after fifteen seconds and answers `502` — and the app does **not** fall back to
-FormSubmit on a 502, on purpose, because a 502 also covers real faults such as an
-oversized PDF. So the honest "no mailbox here" state is the one that works: with
-`MAIL_TO`/`SMTP_*` unset, `/api/email` answers `503 email_not_configured`, which
-the app already knows how to recover from, and the application goes out through
-the old path instead of failing.
+after fifteen seconds and answers `502`. So the permanent path for a free instance
+is **Formspree over HTTPS**: set `FORMSPREE_ENDPOINT` to a form the office keeps
+at Formspree (it already uses Formspree elsewhere), and the application — PDF and
+all — is posted to it, with the recipient fixed on the form. Render's free tier
+allows ordinary HTTPS, so this works where SMTP cannot.
+
+Both paths are tried in order: SMTP first (a mailbox we control, for a paid host
+or a local `npm start`), Formspree second. With **neither** set, `/api/email`
+stores the PDF in the bucket and answers `503 email_not_configured` (with
+`stored:true`), and the office downloads it from `/admin` — nothing is lost and
+nothing is falsely reported as sent.
 
 The tell is `GET /health`. `emailConfigured: true` on a host whose SMTP ports are
-blocked means every send will time out; set those variables only where outbound
-SMTP actually works — a paid instance, a VPS, or a local `npm start`.
+blocked but with no `FORMSPREE_ENDPOINT` means every send will time out; set
+`FORMSPREE_ENDPOINT` (or move to a paid instance / VPS and set the SMTP variables).
 
-Setting it up is five variables (`MAIL_TO`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`,
-`SMTP_PASS`; Gmail wants an **app password**, not the account password) — see
-`.env.example` and `render.yaml`. Leaving them unset is a supported state, not a
-broken one: `npm test` exercises the 503 path on purpose.
+A backed-up application can be pushed out once delivery is working — the "fallback
+after the backup" — with `POST /api/admin/submissions/:id/resend` (admin key).
 
 ## Tests
 ```bash
@@ -297,9 +316,8 @@ thing you pushed the thing that is live?" has a yes or no answer.
 **Why no disk is needed.** Every byte that matters — the invitations, the uploaded
 documents and the signature images — is a row in the Turso database, so Render's
 ephemeral filesystem has nothing to lose. The free instance sleeps after about 15
-minutes idle and takes up to a minute to wake, so the first page load after a quiet
-spell is slow; that delay is the whole cost of the free plan, and the data is
-untouched while it sleeps.
+minutes idle and can take up to a minute to wake, so the first page load after a
+quiet spell may be slow. The data is untouched while it sleeps.
 
 `STORAGE_DIR` and `khusela.db` are still supported for local development and tests,
 where no account and no network are wanted. A deployment simply sets
