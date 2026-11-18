@@ -20,6 +20,20 @@ const BASE=(process.env.PUBLIC_BASE_URL||process.env.RENDER_EXTERNAL_URL||`http:
 if(/^https?:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/i.test(BASE)){
  console.warn(`WARNING: no public URL is configured. Signing links will point at ${BASE} and will only open on this machine.`);
 }
+
+// ── Vicidial call recordings (optional evidence for one application) ─────────
+// The PWA never talks to Vicidial and never sees these credentials. It asks this
+// service for a consultant's recordings, then sends the chosen MP3 back here with
+// the PDF. This process is the only place that knows the API password and the
+// (optional) password protecting Vicidial's /RECORDINGS/ folder.
+const VICIDIAL_BASE_URL=String(process.env.VICIDIAL_BASE_URL||'').replace(/\/+$/,'');
+const VICIDIAL_API_PATH=process.env.VICIDIAL_API_PATH||'/vicidial/non_agent_api.php';
+const VICIDIAL_API_USER=process.env.VICIDIAL_API_USER||'';
+const VICIDIAL_API_PASS=process.env.VICIDIAL_API_PASS||'';
+const VICIDIAL_RECORDINGS_PATH=process.env.VICIDIAL_RECORDINGS_PATH||'/RECORDINGS/';
+const VICIDIAL_RECORDINGS_USER=process.env.VICIDIAL_RECORDINGS_USER||'';
+const VICIDIAL_RECORDINGS_PASS=process.env.VICIDIAL_RECORDINGS_PASS||'';
+const vicidialConfigured=()=>!!(VICIDIAL_BASE_URL&&VICIDIAL_API_USER&&VICIDIAL_API_PASS);
 // Every request reaches this process through the host's own proxy, so the socket
 // peer is that proxy and not the client. On Render that made every signature row
 // record "::1" as the IP: a value that identifies nobody and leaves the audit trail
@@ -118,6 +132,12 @@ async function prepareDatabase(){
  // The report bucket records who signed it alongside the applicant's name and ID,
  // so a report can be matched to the signing request it came from.
  await ensureColumn('submissions','signer_label','TEXT');
+ // An optional call recording belongs to the SAME submission as its PDF. Storing
+ // it beside the form is what makes a failed or late email recoverable with the
+ // voice evidence intact, rather than leaving the MP3 only in a browser.
+ await ensureColumn('submissions','recording_name','TEXT');
+ await ensureColumn('submissions','recording_size','INTEGER');
+ await ensureColumn('submissions','recording_content','BLOB');
  // The manage token is the consultant-side capability: it is only ever returned
  // to the app that created the request, never sent to the client.
  await run('CREATE UNIQUE INDEX IF NOT EXISTS idx_invitations_manage_token ON invitations(manage_token_hash)');
@@ -194,6 +214,49 @@ function submissionDownloadAllowed(submissionId,expires,signature){
  const given=Buffer.from(String(signature||''));
  return expected.length===given.length&&crypto.timingSafeEqual(expected,given);
 }
+// A recording is fetched from Vicidial through this service so the browser never
+// sees the /RECORDINGS/ password. The link is signed and confined to the
+// configured Vicidial host and recordings path: a caller cannot swap in another
+// URL and turn this route into a proxy for anything else.
+function recordingLinkSignature(location,expires){
+ return crypto.createHmac('sha256',SUBMISSION_LINK_SECRET).update(`recording.${location}.${expires}`).digest('base64url');
+}
+function recordingAudioUrl(location){
+ if(!SUBMISSION_LINK_SECRET||!location) return '';
+ const expires=Date.now()+SUBMISSION_LINK_DAYS*86400000;
+ const sig=recordingLinkSignature(location,expires);
+ return `${BASE}/api/recordings/audio?location=${encodeURIComponent(location)}&expires=${expires}&signature=${encodeURIComponent(sig)}`;
+}
+function recordingLinkAllowed(location,expires,signature){
+ if(!SUBMISSION_LINK_SECRET) return false;
+ const exp=Number(expires);
+ if(!Number.isFinite(exp)||exp<Date.now()) return false;
+ let target,base;
+ try{ target=new URL(String(location)); base=new URL(VICIDIAL_BASE_URL); }catch(e){ return false; }
+ if(target.origin!==base.origin) return false;
+ if(target.pathname.toUpperCase().indexOf(VICIDIAL_RECORDINGS_PATH.toUpperCase())!==0) return false;
+ if(!/\.(mp3|wav)$/i.test(target.pathname)) return false;
+ const expected=Buffer.from(recordingLinkSignature(String(location),exp));
+ const given=Buffer.from(String(signature||''));
+ return expected.length===given.length&&crypto.timingSafeEqual(expected,given);
+}
+function recordingDownloadSignature(submissionId,expires){
+ return crypto.createHmac('sha256',SUBMISSION_LINK_SECRET).update(`stored-recording.${submissionId}.${expires}`).digest('base64url');
+}
+function submissionRecordingDownloadUrl(submissionId){
+ if(!SUBMISSION_LINK_SECRET) return '';
+ const expires=Date.now()+SUBMISSION_LINK_DAYS*86400000;
+ const sig=recordingDownloadSignature(submissionId,expires);
+ return `${BASE}/api/submissions/${encodeURIComponent(submissionId)}/recording?expires=${expires}&signature=${encodeURIComponent(sig)}`;
+}
+function storedRecordingAllowed(submissionId,expires,signature){
+ if(!SUBMISSION_LINK_SECRET) return false;
+ const exp=Number(expires);
+ if(!Number.isFinite(exp)||exp<Date.now()) return false;
+ const expected=Buffer.from(recordingDownloadSignature(submissionId,exp));
+ const given=Buffer.from(String(signature||''));
+ return expected.length===given.length&&crypto.timingSafeEqual(expected,given);
+}
 // Express 4 does not pass a rejected promise from an async handler on to the error
 // middleware, so an async route that throws would leave the request hanging until
 // the client gave up. Wrapping keeps such failures ordinary error responses.
@@ -266,7 +329,7 @@ function inviteRateLimit(req,res,next){
 // pushed?" is one request with no credentials: Render puts the commit in
 // RENDER_GIT_COMMIT, and tools/check_deployed.js compares it with the local HEAD.
 // Anything without that variable — a laptop running npm start — says 'local'.
-app.get('/health',(req,res)=>res.json({ok:true,service:'khusela-digital-signature',build:process.env.RENDER_GIT_COMMIT||'local',inviteProtected:!!INVITE_KEY,emailConfigured:mailConfigured(),emailPaths:mailPaths(),emailProtected:!!process.env.EMAIL_API_KEY,time:now()}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'khusela-digital-signature',build:process.env.RENDER_GIT_COMMIT||'local',inviteProtected:!!INVITE_KEY,emailConfigured:mailConfigured(),emailPaths:mailPaths(),emailProtected:!!process.env.EMAIL_API_KEY,recordingsConfigured:vicidialConfigured(),time:now()}));
 
 // The client's link points at /sign/<token>, but the page behind it is one static
 // file for every token: public/sign.html reads the token out of its own path.
@@ -361,13 +424,19 @@ function emailGate(req,res,next){
  if(!emailAuthorized(req)) return res.status(401).json({error:'This endpoint emails Khusela applications to the Khusela office only'});
  next();
 }
-// One PDF and nothing else: that is what this route exists to carry.
+// One PDF, plus at most one optional call recording. The old single('attachment')
+// rejected the second field with LIMIT_UNEXPECTED_FILE, so an application with
+// voice evidence could not be submitted at all.
+const RECORDING_MAX_BYTES=15*1024*1024;
 const emailUpload=multer({
  storage:multer.memoryStorage(),
- limits:{fileSize:MAX_EMAIL_BYTES,files:1},
+ limits:{fileSize:MAX_EMAIL_BYTES,files:2},
  fileFilter:(req,file,cb)=>{
-  if(file.mimetype==='application/pdf') return cb(null,true);
-  const bad=new Error('The application has to be sent as a PDF'); bad.status=400; cb(bad);
+  if(file.fieldname==='attachment'&&file.mimetype==='application/pdf') return cb(null,true);
+  if(file.fieldname==='recording'&&/^(audio\/(mpeg|mp3|wav|wave|x-wav)|application\/octet-stream)$/.test(file.mimetype)) return cb(null,true);
+  const bad=new Error(file.fieldname==='recording'
+   ?'The call recording has to be an MP3 or WAV file'
+   :'The application has to be sent as a PDF'); bad.status=400; cb(bad);
  },
 });
 
@@ -378,11 +447,15 @@ const emailUpload=multer({
 // went out, so the office can tell a backed-up-but-not-emailed report from one
 // that arrived in the inbox.
 function cleanSubmissionText(v,n){return String(v==null?'':v).replace(/[\r\n]+/g,' ').trim().slice(0,n);}
-async function saveSubmission({file,b,submissionId,status}){
+async function saveSubmission({file,b,submissionId,status,recording}){
  await run(
-  `INSERT INTO submissions(id,filename,applicant,id_number,signer_label,app_date,reply_to,size,content,email_status,created_at)
-   VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-  [submissionId,cleanSubmissionText(file.originalname,200),cleanSubmissionText(b.applicant,120),cleanSubmissionText(b.idNumber,40),cleanSubmissionText(b.signerLabel,80),cleanSubmissionText(b.date,40),cleanSubmissionText(b.replyTo,200),file.size,file.buffer,status,now()],
+  `INSERT INTO submissions(id,filename,applicant,id_number,signer_label,app_date,reply_to,size,content,email_status,email_error,message_id,accepted,recording_name,recording_size,recording_content,created_at)
+   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  [submissionId,cleanSubmissionText(file.originalname,200),cleanSubmissionText(b.applicant,120),cleanSubmissionText(b.idNumber,40),cleanSubmissionText(b.signerLabel,80),cleanSubmissionText(b.date,40),cleanSubmissionText(b.replyTo,200),file.size,file.buffer,status,null,null,null,
+   recording?cleanSubmissionText(recording.originalname,200):null,
+   recording?recording.size:null,
+   recording?recording.buffer:null,
+   now()],
  );
 }
 async function updateSubmission(submissionId,{status,error,messageId,accepted}){
@@ -392,23 +465,28 @@ async function updateSubmission(submissionId,{status,error,messageId,accepted}){
  );
 }
 
-app.post('/api/email',emailRateLimit,emailGate,emailUpload.single('attachment'),wrap(async(req,res)=>{
- const file=req.file;
+app.post('/api/email',emailRateLimit,emailGate,emailUpload.fields([{name:'attachment',maxCount:1},{name:'recording',maxCount:1}]),wrap(async(req,res)=>{
+ const files=req.files||{};
+ const file=(files.attachment||[])[0];
  if(!file) return res.status(400).json({error:'The application PDF is missing from the request'});
+ const recording=(files.recording||[])[0];
+ if(recording&&recording.size>RECORDING_MAX_BYTES){
+  return res.status(413).json({error:`The call recording is ${(recording.size/1048576).toFixed(1)} MB, over the ${Math.round(RECORDING_MAX_BYTES/1048576)} MB recording limit`});
+ }
  const b=req.body||{};
  const submissionId=id();
  // Stored FIRST, before any delivery is attempted. If this insert fails there is
  // no copy and nothing is emailed: the error handler answers that failure instead
  // of a route pretending it kept a report. Every later outcome only updates this
  // row, so a crash during delivery cannot lose the PDF.
- await saveSubmission({file,b,submissionId,status:'pending'});
+ await saveSubmission({file,b,submissionId,status:'pending',recording});
  if(!mailConfigured()){
   await updateSubmission(submissionId,{status:'not_configured'});
   // Still the same 503 the PWA reads as "no delivery here", now carrying the
   // proof that the PDF was kept: submissionId + stored. The app uses that to say
   // the application was saved to the office's bucket rather than fall back to a
   // form-to-email service that cannot confirm delivery.
-  return res.status(503).json({error:'email_not_configured',message:'No delivery is configured yet (mailbox, Brevo or Formspree), so the application was not emailed — but it has been saved to the office\'s report bucket.',submissionId,stored:true});
+  return res.status(503).json({error:'email_not_configured',message:'No delivery is configured yet (mailbox, Brevo or Formspree), so the application was not emailed — but it has been saved to the office\'s report bucket.',submissionId,stored:true,recordingStored:!!recording});
  }
  try{
   const out=await sendApplication({
@@ -421,13 +499,19 @@ app.post('/api/email',emailRateLimit,emailGate,emailUpload.single('attachment'),
    replyTo:b.replyTo,
    // Only used if Formspree's plan refuses the file and it falls back to a link.
    downloadUrl:submissionDownloadUrl(submissionId),
+   recording:recording?{
+    filename:recording.originalname,
+    buffer:recording.buffer,
+    url:submissionRecordingDownloadUrl(submissionId),
+   }:null,
   });
   await updateSubmission(submissionId,{status:'sent',messageId:out.messageId||null,accepted:(out.accepted||[]).join(', ')});
   // One line per application that went out, so the log answers "did it arrive?"
   // without a mailbox. The applicant's own address is deliberately not in it —
   // the message headers carry that and this log is not the place for it.
   console.log(`Application emailed (${(file.size/1048576).toFixed(1)} MB, message ${out.messageId||'?'}, accepted by ${out.accepted.join(', ')||'nobody'}) — saved as submission ${submissionId}`);
-  res.json({ok:true,messageId:out.messageId,accepted:out.accepted.length>0,submissionId,stored:true,linkOnly:!!out.linkOnly});
+  res.json({ok:true,messageId:out.messageId,accepted:out.accepted.length>0,submissionId,stored:true,linkOnly:!!out.linkOnly,
+   recordingStored:!!recording,recordingLinkOnly:!!recording&&!out.recordingAttached});
  }catch(e){
   // Every delivery path refused or could not be reached. That is neither the
   // caller's mistake nor a fault in this process, so it is a 502 carrying the
@@ -435,7 +519,90 @@ app.post('/api/email',emailRateLimit,emailGate,emailUpload.single('attachment'),
   // retrying is worth it. The PDF is still in the bucket, so nothing is lost.
   console.error('email send failed: '+(e&&e.message?e.message:e));
   await updateSubmission(submissionId,{status:'failed',error:(e&&e.message?e.message:e)||'the mail server refused it'});
-  res.status(502).json({error:'The application could not be emailed: '+((e&&e.message)||'the mail server refused it'),submissionId,stored:true});
+  res.status(502).json({error:'The application could not be emailed: '+((e&&e.message)||'the mail server refused it'),submissionId,stored:true,recordingStored:!!recording});
+ }
+}));
+
+// ── Vicidial recording lookup / fetch ────────────────────────────────────────
+// The PWA sends only a consultant's Vicidial login and a date. This service owns
+// the API password and the optional /RECORDINGS/ password, and returns a short
+// list of calls plus a signed URL for each file. No browser ever sees either
+// secret, and the signed URL is confined to the configured Vicidial host.
+const RECORDING_FETCH_TIMEOUT_MS=Math.min(60000,Math.max(1000,Number(process.env.RECORDING_FETCH_TIMEOUT_MS||20000)));
+function cleanAgent(v){return String(v||'').trim().slice(0,40);}
+function validDate(v){return /^\d{4}-\d{2}-\d{2}$/.test(String(v||''));}
+function parseRecordingRows(text){
+ const out=[];
+ String(text||'').split(/\r?\n/).forEach(line=>{
+  const s=line.trim();
+  if(!s||/^ERROR:/i.test(s)) return;
+  const p=s.split('|');
+  if(p.length<5) return;
+  // start_time|user|recording_id|lead_id|duration|location   (duration=Y)
+  // start_time|user|recording_id|lead_id|location            (older builds)
+  const row=p.length>=6
+   ?{start_time:p[0],agent:p[1],recording_id:p[2],lead_id:p[3],duration:p[4],location:p.slice(5).join('|')}
+   :{start_time:p[0],agent:p[1],recording_id:p[2],lead_id:p[3],duration:'',location:p.slice(4).join('|')};
+  if(!/^https?:\/\//i.test(row.location)) return;
+  try{ row.filename=decodeURIComponent(row.location.split('/').pop().split('?')[0]).slice(0,200); }catch(e){ row.filename='call-recording.mp3'; }
+  row.audioUrl=recordingAudioUrl(row.location);
+  out.push(row);
+ });
+ return out;
+}
+async function vicidialLookup(agentUser,date){
+ const raw=VICIDIAL_BASE_URL.startsWith('http')?VICIDIAL_BASE_URL:`https://${VICIDIAL_BASE_URL}`;
+ const u=new URL(raw.replace(/\/+$/,'')+VICIDIAL_API_PATH);
+ u.searchParams.set('source','khusela-itc');
+ u.searchParams.set('user',VICIDIAL_API_USER);
+ u.searchParams.set('pass',VICIDIAL_API_PASS);
+ u.searchParams.set('function','recording_lookup');
+ u.searchParams.set('agent_user',agentUser);
+ u.searchParams.set('date',date);
+ u.searchParams.set('stage','pipe');
+ u.searchParams.set('duration','Y');
+ u.searchParams.set('header','NO');
+ const res=await fetch(u,{signal:AbortSignal.timeout(RECORDING_FETCH_TIMEOUT_MS)});
+ const text=await res.text();
+ if(!res.ok) throw new Error(`Vicidial answered HTTP ${res.status}`);
+ if(/^ERROR:/i.test(text.trim())) throw new Error(text.trim().replace(/\|.*$/,''));
+ return parseRecordingRows(text);
+}
+app.get('/api/recordings',wrap(async(req,res)=>{
+ if(!vicidialConfigured()) return res.status(503).json({error:'Vicidial recording lookup is not configured on this server'});
+ if(!emailAuthorized(req)) return res.status(401).json({error:'This endpoint is for the Khusela application only'});
+ const agent=cleanAgent(req.query.agent||req.query.agent_user);
+ const date=String(req.query.date||'');
+ if(!agent||!validDate(date)) return res.status(400).json({error:'A Vicidial login and a date (YYYY-MM-DD) are required'});
+ try{
+  const rows=await vicidialLookup(agent,date);
+  res.json({ok:true,agent,date,rows});
+ }catch(e){
+  console.error('Vicidial recording lookup failed: '+(e&&e.message?e.message:e));
+  res.status(502).json({error:'Could not look up recordings on Vicidial: '+((e&&e.message?e.message:e)||'the server did not answer')});
+ }
+}));
+// Fetch the MP3 itself for the PWA's preview/selection step. The signed location
+// is checked against the configured host and path before any request is made.
+app.get('/api/recordings/audio',wrap(async(req,res)=>{
+ const location=String(req.query.location||'');
+ if(!recordingLinkAllowed(location,req.query.expires,req.query.signature)) return res.status(401).json({error:'This recording link is invalid or has expired'});
+ let target;
+ try{ target=new URL(location); }catch(e){ return res.status(400).json({error:'Invalid recording location'}); }
+ const headers={};
+ if(VICIDIAL_RECORDINGS_USER) headers.Authorization='Basic '+Buffer.from(`${VICIDIAL_RECORDINGS_USER}:${VICIDIAL_RECORDINGS_PASS}`).toString('base64');
+ try{
+  const upstream=await fetch(target,{headers,signal:AbortSignal.timeout(RECORDING_FETCH_TIMEOUT_MS)});
+  if(!upstream.ok) return res.status(502).json({error:`Vicidial did not provide the recording (HTTP ${upstream.status})`});
+  const type=upstream.headers.get('content-type')||(/\.wav$/i.test(target.pathname)?'audio/wav':'audio/mpeg');
+  res.setHeader('Content-Type',type);
+  res.setHeader('Content-Disposition','inline');
+  res.setHeader('Cache-Control','no-store');
+  res.setHeader('X-Robots-Tag','noindex, nofollow');
+  res.send(Buffer.from(await upstream.arrayBuffer()));
+ }catch(e){
+  console.error('Vicidial recording fetch failed: '+(e&&e.message?e.message:e));
+  res.status(502).json({error:'Could not download the recording from Vicidial'});
  }
 }));
 
@@ -598,8 +765,26 @@ app.get('/api/submissions/:id/pdf',wrap(async(req,res)=>{
  if(!row.content) return res.status(404).json({error:'The stored PDF is no longer available'});
  sendSubmissionPdf(res,row);
 }));
+// The optional voice evidence stored with the same submission, reachable by the
+// same signed-link mechanism as the PDF and by the admin key. A report in the
+// bucket therefore carries both the form and the call that produced it.
+function sendSubmissionRecording(res,row){
+  res.setHeader('Content-Type','audio/mpeg');
+  res.setHeader('Content-Disposition','attachment; filename="'+String(row.recording_name||'call-recording.mp3').replace(/["\\]/g,'_')+'"');
+  res.setHeader('Cache-Control','no-store');
+  res.setHeader('X-Robots-Tag','noindex, nofollow');
+  res.send(Buffer.from(row.recording_content));
+}
+app.get('/api/submissions/:id/recording',wrap(async(req,res)=>{
+ if(!storedRecordingAllowed(req.params.id,req.query.expires,req.query.signature)){
+  return res.status(401).json({error:'This recording link is invalid or has expired'});
+ }
+ const row=await get('SELECT recording_name,recording_content FROM submissions WHERE id=?',[req.params.id]);
+ if(!row||!row.recording_content) return res.status(404).json({error:'This application has no stored call recording'});
+ sendSubmissionRecording(res,row);
+}));
 app.get('/api/admin/submissions',requireAdmin,wrap(async(req,res)=>{
- const rows=await all('SELECT id,filename,applicant,id_number,signer_label,app_date,size,email_status,email_error,message_id,accepted,created_at FROM submissions ORDER BY created_at DESC LIMIT 500');
+ const rows=await all('SELECT id,filename,applicant,id_number,signer_label,app_date,size,email_status,email_error,message_id,accepted,recording_name,recording_size,created_at FROM submissions ORDER BY created_at DESC LIMIT 500');
  res.json({ok:true,rows});
 }));
 app.get('/api/admin/submissions/:id',requireAdmin,wrap(async(req,res)=>{
@@ -613,6 +798,12 @@ app.get('/api/admin/submissions/:id/pdf',requireAdmin,wrap(async(req,res)=>{
  const bytes=row.content;
  if(!bytes) return res.status(404).json({error:'The stored PDF is no longer available'});
  sendSubmissionPdf(res,row);
+}));
+app.get('/api/admin/submissions/:id/recording',requireAdmin,wrap(async(req,res)=>{
+ const row=await get('SELECT recording_name,recording_content FROM submissions WHERE id=?',[req.params.id]);
+ if(!row) return res.status(404).json({error:'Submission not found'});
+ if(!row.recording_content) return res.status(404).json({error:'This application has no stored call recording'});
+ sendSubmissionRecording(res,row);
 }));
 
 // Re-send a stored application that never made it out (email_status

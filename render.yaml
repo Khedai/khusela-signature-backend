@@ -145,3 +145,24 @@ services:
       #   sync: false
       # - key: SUBMISSION_LINK_DAYS
       #   value: "30"
+      # ── Optional Vicidial recordings ────────────────────────────────────────
+      # All commented out = no recording feature and the email says none was
+      # attached. Add them by hand in Dashboard > Environment for an existing
+      # service (a Blueprint sync does not push new keys into one already there).
+      # The API user needs level 7+, "view reports", and view permission on the
+      # consultant user groups. Render's IP must be allowed to reach /RECORDINGS/;
+      # if that folder is password-protected, set the two RECORDINGS keys too.
+      # - key: VICIDIAL_BASE_URL
+      #   value: https://companyname.dialer.co.za
+      # - key: VICIDIAL_API_PATH
+      #   value: /vicidial/non_agent_api.php
+      # - key: VICIDIAL_API_USER
+      #   sync: false
+      # - key: VICIDIAL_API_PASS
+      #   sync: false
+      # - key: VICIDIAL_RECORDINGS_PATH
+      #   value: /RECORDINGS/
+      # - key: VICIDIAL_RECORDINGS_USER
+      #   sync: false
+      # - key: VICIDIAL_RECORDINGS_PASS
+      #   sync: false

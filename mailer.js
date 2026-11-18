@@ -134,11 +134,16 @@ const cleanField=(v,n)=>String(v==null?'':v).replace(/[\r\n]+/g,' ').trim().slic
 // the path cannot carry the attachment (Formspree's free plan); the secure link
 // is then the way to the PDF, and the text says so rather than pretending a file
 // is attached.
-function applicationText({applicant,idNumber,signerLabel,date,downloadUrl}={}){
+function applicationText({applicant,idNumber,signerLabel,date,downloadUrl,recordingName,recordingUrl}={}){
  const who=cleanField(applicant,120);
  const ref=cleanField(idNumber,40);
  const signer=cleanField(signerLabel,80);
  const when=cleanField(date,40);
+ // The office must never have to guess whether voice evidence was supplied.
+ // This line is in EVERY delivery path, attached or link-only.
+ const recording = recordingName
+  ? (recordingUrl ? `Call recording: download from ${recordingUrl}` : `Call recording: attached as ${cleanField(recordingName,120)}`)
+  : 'Call recording: no call recording was attached to this application.';
  return [
   `Applicant: ${who||'(not given)'}`,
   ref?`ID number: ${ref}`:null,
@@ -149,24 +154,44 @@ function applicationText({applicant,idNumber,signerLabel,date,downloadUrl}={}){
    ? 'The completed Khusela credit application is ready to download from the secure link below. The link is private and expires.'
    : 'The completed Khusela credit application is attached to this email as a PDF.',
   downloadUrl?`Download PDF: ${downloadUrl}`:null,
+  recording,
   "Any signature captured on the client's own device is already included in that PDF.",
  ].filter(v=>v!==null).join('\n');
+}
+// Attach the MP3 only when PDF + recording still fit the service's ceiling.
+// Otherwise the signed link in the body is the way to the evidence, and the body
+// says so rather than claiming a file was attached.
+function recordingAttachment(pdf,recording){
+ if(!recording||!recording.buffer||!recording.buffer.length) return null;
+ if(pdf.length+recording.buffer.length>MAX_EMAIL_BYTES) return null;
+ return {filename:cleanField(recording.filename,120)||'call-recording.mp3',content:recording.buffer,contentType:'audio/mpeg'};
+}
+function recordingFields(pdf,recording){
+ const attached=recordingAttachment(pdf,recording);
+ return {
+  attached,
+  name:recording?(attached?attached.filename:''):'',
+  url:recording&&!attached?(recording.url||''):'',
+ };
 }
 
 // ── Path 1: our own mailbox over SMTP ────────────────────────────────────────
 // Only runs when SMTP_USER/SMTP_PASS/MAIL_TO are set — a paid host or a local
 // `npm start`. Render's free tier cannot reach SMTP ports (25/465/587), so there
 // this path is simply skipped and an HTTPS path below carries the application.
-async function sendViaSmtp({filename,pdf,applicant,idNumber,signerLabel,date,replyTo}={}){
+async function sendViaSmtp({filename,pdf,applicant,idNumber,signerLabel,date,replyTo,recording}={}){
  const who=cleanField(applicant,120);
  const name=cleanField(filename,120)||'Khusela-Credit-Application.pdf';
- const body=applicationText({applicant,idNumber,signerLabel,date});
+ const rec=recordingFields(pdf,recording);
+ const body=applicationText({applicant,idNumber,signerLabel,date,recordingName:rec.name,recordingUrl:rec.url});
+ const attachments=[{filename:name,content:pdf,contentType:'application/pdf'}];
+ if(rec.attached) attachments.push({filename:rec.attached.filename,content:rec.attached.content,contentType:'audio/mpeg'});
  const mail={
   from:MAIL_FROM,
   to:MAIL_TO.join(','),
   subject:who?`${MAIL_SUBJECT} - ${who}`:MAIL_SUBJECT,
   text:body,
-  attachments:[{filename:name,content:pdf,contentType:'application/pdf'}],
+  attachments,
  };
  // Deliberately a check and not a copy: the applicant's address becomes the
  // Reply-To only when it looks like an address, so the office can reply straight
@@ -179,6 +204,7 @@ async function sendViaSmtp({filename,pdf,applicant,idNumber,signerLabel,date,rep
   messageId:info.messageId,
   accepted:(info.accepted||[]).map(addr).filter(Boolean),
   rejected:(info.rejected||[]).map(addr).filter(Boolean),
+  recordingAttached:!!rec.attached,
  };
 }
 
@@ -187,19 +213,22 @@ async function sendViaSmtp({filename,pdf,applicant,idNumber,signerLabel,date,rep
 // plan accepts an attachment (up to 25 MB) and 300 messages a day, so this is the
 // permanent way to keep the actual PDF in the office's inbox on a free instance.
 // The recipient is still MAIL_TO and nothing in the request can name one.
-async function sendViaBrevo({filename,pdf,applicant,idNumber,signerLabel,date,replyTo}={}){
+async function sendViaBrevo({filename,pdf,applicant,idNumber,signerLabel,date,replyTo,recording}={}){
  if(!brevoConfigured()) throw new Error('Brevo is not configured on the server (BREVO_API_KEY / BREVO_SENDER / MAIL_TO)');
  const who=cleanField(applicant,120);
  const reply=cleanField(replyTo,200);
+ const rec=recordingFields(pdf,recording);
+ const attachment=[{
+  name:cleanField(filename,120)||'Khusela-Credit-Application.pdf',
+  content:Buffer.from(pdf).toString('base64'),
+ }];
+ if(rec.attached) attachment.push({name:rec.attached.filename,content:rec.attached.content.toString('base64')});
  const payload={
   sender:{email:BREVO_SENDER, name:'Khusela Management'},
   to:MAIL_TO.map(email=>({email})),
   subject:who?`${MAIL_SUBJECT} - ${who}`:MAIL_SUBJECT,
-  textContent:applicationText({applicant,idNumber,signerLabel,date}),
-  attachment:[{
-   name:cleanField(filename,120)||'Khusela-Credit-Application.pdf',
-   content:Buffer.from(pdf).toString('base64'),
-  }],
+  textContent:applicationText({applicant,idNumber,signerLabel,date,recordingName:rec.name,recordingUrl:rec.url}),
+  attachment,
  };
  if(looksLikeEmail(reply)) payload.replyTo={email:reply};
  let res;
@@ -223,7 +252,7 @@ async function sendViaBrevo({filename,pdf,applicant,idNumber,signerLabel,date,re
  }
  let id=null;
  try{ const j=await res.json(); id=j&&j.messageId?j.messageId:null; }catch(e){}
- return { messageId:id, accepted:MAIL_TO.slice(), rejected:[] };
+ return { messageId:id, accepted:MAIL_TO.slice(), rejected:[], recordingAttached:!!rec.attached };
 }
 
 // ── Path 3: Formspree over HTTPS ─────────────────────────────────────────────
@@ -233,10 +262,14 @@ async function sendViaBrevo({filename,pdf,applicant,idNumber,signerLabel,date,re
 // application is posted again without the file and with `downloadUrl` — a
 // secure, expiring link generated by server.js — in the email. The office still
 // gets the application, and the bucket remains the permanent copy.
-async function sendViaFormspree({filename,pdf,applicant,idNumber,signerLabel,date,replyTo,downloadUrl}={}){
+async function sendViaFormspree({filename,pdf,applicant,idNumber,signerLabel,date,replyTo,downloadUrl,recording}={}){
  if(!FORMSPREE_ENDPOINT) throw new Error('Formspree is not configured on the server');
  const who=cleanField(applicant,120);
  const reply=cleanField(replyTo,200);
+ const rec=recordingFields(pdf,recording);
+ const recordingLine = rec.attached
+  ? 'Call recording: attached as '+rec.name
+  : (recording && rec.url ? 'Call recording: download from '+rec.url : 'Call recording: no call recording was attached to this application.');
  const post=async(withFile)=>{
   const form=new FormData();
   form.append('_subject', who?`${MAIL_SUBJECT} - ${who}`:MAIL_SUBJECT);
@@ -245,8 +278,10 @@ async function sendViaFormspree({filename,pdf,applicant,idNumber,signerLabel,dat
   form.append('ID Number', cleanField(idNumber,40));
   form.append('Signer', cleanField(signerLabel,80));
   form.append('Date', cleanField(date,40));
+  form.append('Call Recording', recordingLine);
   if(withFile){
    form.append('attachment', new Blob([pdf], {type:'application/pdf'}), cleanField(filename,120)||'Khusela-Credit-Application.pdf');
+   if(rec.attached) form.append('recording', new Blob([rec.attached.content], {type:'audio/mpeg'}), rec.name);
   }else{
    // The free plan can carry text fields; the PDF stays in the bucket and this
    // link is the way to it. A missing link means this fallback cannot run, so
@@ -272,14 +307,14 @@ async function sendViaFormspree({filename,pdf,applicant,idNumber,signerLabel,dat
   return {res,body};
  };
  const first=await post(true);
- if(first.res.ok) return { messageId:null, accepted:['formspree'], rejected:[] };
+ if(first.res.ok) return { messageId:null, accepted:['formspree'], rejected:[], recordingAttached:!!rec.attached };
  // Only a plan/upload refusal (or a file too large for the provider) falls back
  // to the link. Any other refusal (bad endpoint, unconfirmed form, quota) is a
  // real failure and is reported as one.
  const uploadRefused=/file uploads? (not permitted|are not allowed)/i.test(first.body)||first.res.status===413;
  if(uploadRefused && downloadUrl){
   const second=await post(false);
-  if(second.res.ok) return { messageId:null, accepted:['formspree (secure link)'], rejected:[], linkOnly:true };
+  if(second.res.ok) return { messageId:null, accepted:['formspree (secure link)'], rejected:[], linkOnly:true, recordingAttached:false };
   throw new Error(`Formspree answered ${second.res.status} ${second.body}`.trim());
  }
  throw new Error(`Formspree answered ${first.res.status} ${first.body}`.trim());
@@ -291,12 +326,12 @@ async function sendViaFormspree({filename,pdf,applicant,idNumber,signerLabel,dat
 // PDF is already in the bucket by the time this runs (see server.js), so nothing
 // here can lose an application. `downloadUrl` is used only by Formspree's
 // file-upload fallback.
-export async function sendApplication({filename,pdf,applicant,idNumber,signerLabel,date,replyTo,downloadUrl}={}){
+export async function sendApplication({filename,pdf,applicant,idNumber,signerLabel,date,replyTo,downloadUrl,recording}={}){
  if(!mailConfigured()) throw new Error('Email is not configured on the server');
  if(!pdf||!pdf.length) throw new Error('The PDF attachment is empty');
  if(pdf.length>MAX_EMAIL_BYTES) throw new Error(`The PDF is ${(pdf.length/1048576).toFixed(1)} MB, over this service's ${MAX_EMAIL_MB} MB email limit`);
  const errors=[];
- const delivery={filename,pdf,applicant,idNumber,signerLabel,date,replyTo};
+ const delivery={filename,pdf,applicant,idNumber,signerLabel,date,replyTo,recording};
  if(smtpConfigured()){
   try{ return await sendViaSmtp(delivery); }
   catch(e){ errors.push('mailbox: '+(e&&e.message?e.message:e)); }

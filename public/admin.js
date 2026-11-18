@@ -70,7 +70,7 @@
     if (!rows.length) {
       const tr = document.createElement('tr');
       const td = document.createElement('td');
-      td.colSpan = 8;
+      td.colSpan = 9;
       td.textContent = 'No applications have been submitted yet.';
       tr.appendChild(td);
       listBody.appendChild(tr);
@@ -115,6 +115,21 @@
       stateTd.appendChild(badge);
       tr.appendChild(stateTd);
 
+      // The MP3 lives on the same submission as the PDF. Show its presence
+      // explicitly so an application with no voice evidence is obvious too.
+      const recTd = document.createElement('td');
+      if (r.recording_name) {
+        const recBtn = document.createElement('button');
+        recBtn.textContent = 'Download MP3';
+        recBtn.className = 'secondary';
+        recBtn.addEventListener('click', () => downloadRecording(r.id, r.recording_name));
+        recTd.appendChild(recBtn);
+      } else {
+        recTd.textContent = 'none';
+        recTd.style.color = '#888';
+      }
+      tr.appendChild(recTd);
+
       const dlTd = document.createElement('td');
       const btn = document.createElement('button');
       btn.textContent = 'Download PDF';
@@ -158,6 +173,29 @@
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 30000);
     setStatus('Downloaded ' + (filename || 'application.pdf') + '.', 'ok');
+  }
+
+  async function downloadRecording(id, filename) {
+    setStatus('Downloading call recording…');
+    let res;
+    try {
+      res = await authFetch('/api/admin/submissions/' + encodeURIComponent(id) + '/recording');
+    } catch (e) {
+      setStatus('Could not reach the office server.', 'err');
+      return;
+    }
+    if (res.status === 401) { setStatus('That admin key was refused.', 'err'); lock(); return; }
+    if (!res.ok) { setStatus('Could not download the recording (HTTP ' + res.status + ').', 'err'); return; }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename || 'call-recording.mp3';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    setStatus('Downloaded ' + (filename || 'call-recording.mp3') + '.', 'ok');
   }
 
   async function resend(id, label) {

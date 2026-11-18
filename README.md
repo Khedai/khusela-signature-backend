@@ -99,6 +99,48 @@ window can be closed, wipes the signature pad and switches both buttons off. A
 client who leaves the tab open therefore cannot sign a second time that would
 never be sent, nor mistake a signed pad for a form that still has to go.
 
+## Optional Vicidial call recordings
+
+An application may carry **one call recording from Vicidial** as voice evidence.
+It is stored on the **same submission** as the PDF, so the bucket keeps both, and
+the office email always says whether a recording was supplied:
+
+- `Call recording: attached as <file>` when the MP3 went with the message;
+- `Call recording: download from <signed link>` when it was too large to attach;
+- `Call recording: no call recording was attached to this application.` when the
+  consultant did not select one.
+
+The PWA never sees a Vicidial password. It calls
+`GET /api/recordings?agent=<login>&date=YYYY-MM-DD`, which runs `recording_lookup`
+on Vicidial and returns a list of calls with a **signed** `audioUrl` on this
+service. That URL (`GET /api/recordings/audio`) is confined to the configured
+Vicidial host and `/RECORDINGS/` path and proxies the MP3, using basic auth there
+if the folder is protected.
+
+`POST /api/email` accepts a second multipart field, `recording` (MP3/WAV, max
+15 MB). Signed links for a stored recording are
+`GET /api/submissions/:id/recording` and `GET /api/admin/submissions/:id/recording`
+(the latter is also a **Download MP3** button in `/admin`).
+
+Set these in the service environment (see `.env.example` / `render.yaml`):
+
+| Variable | Meaning |
+| --- | --- |
+| `VICIDIAL_BASE_URL` | Origin only, e.g. `https://company.dialer.co.za` |
+| `VICIDIAL_API_PATH` | defaults to `/vicidial/non_agent_api.php` |
+| `VICIDIAL_API_USER` / `VICIDIAL_API_PASS` | level-7+ API user with **view reports** and view permission on the consultant groups |
+| `VICIDIAL_RECORDINGS_PATH` | defaults to `/RECORDINGS/` |
+| `VICIDIAL_RECORDINGS_USER` / `VICIDIAL_RECORDINGS_PASS` | optional basic auth for the recordings folder |
+
+Leave them all unset and `GET /api/recordings` answers 503 with a clear message
+instead of contacting Vicidial; applications still email exactly as before and
+every email says no recording was attached. `/health` reports
+`recordingsConfigured` so the setup can be verified without a lookup.
+
+`node tools/test_recording_route.js` exercises the whole path against a fake
+Vicidial and mailbox: lookup, signed fetch, attach-vs-link, the explicit "no
+recording" sentence, bucket storage and admin download.
+
 ## Emailing the finished application
 
 The PWA renders the application to a PDF and hands it to the backend, which mails
