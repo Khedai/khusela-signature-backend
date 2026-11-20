@@ -170,3 +170,5 @@ services:
       # run tools/vicidial_bridge.js on an office PC and set the tunnel URL here.
       # - key: VICIDIAL_BRIDGE_URL
       #   sync: false
+      # - key: VICIDIAL_BRIDGE_KEY
+      #   sync: false

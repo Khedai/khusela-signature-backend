@@ -30,7 +30,7 @@ if (!BASE || !USER || !PASS) {
  console.error('Fill VICIDIAL_BASE_URL / API_USER / API_PASS in .env.verify first.');
  process.exit(2);
 }
-const KEY = crypto.createHmac('sha256', PASS).update('khusela-vicidial-bridge').digest('hex');
+const KEY = cfg.VICIDIAL_BRIDGE_KEY || crypto.createHmac('sha256', PASS).update('khusela-vicidial-bridge').digest('hex');
 const PORT = Number(process.env.BRIDGE_PORT || 8787);
 
 function get(url) {

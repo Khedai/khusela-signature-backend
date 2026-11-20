@@ -36,7 +36,7 @@ const VICIDIAL_RECORDINGS_PASS=process.env.VICIDIAL_RECORDINGS_PASS||'';
 // Optional free alternative to a static Render IP: an office-side bridge that
 // CAN reach the dialer. Set this to the public tunnel URL of tools/vicidial_bridge.js.
 const VICIDIAL_BRIDGE_URL=String(process.env.VICIDIAL_BRIDGE_URL||'').replace(/\/+$/,'');
-const bridgeKey=()=>crypto.createHmac('sha256',VICIDIAL_API_PASS).update('khusela-vicidial-bridge').digest('hex');
+const bridgeKey=()=>process.env.VICIDIAL_BRIDGE_KEY||crypto.createHmac('sha256',VICIDIAL_API_PASS).update('khusela-vicidial-bridge').digest('hex');
 const vicidialConfigured=()=>!!(VICIDIAL_BASE_URL&&VICIDIAL_API_USER&&VICIDIAL_API_PASS);
 // Every request reaches this process through the host's own proxy, so the socket
 // peer is that proxy and not the client. On Render that made every signature row
