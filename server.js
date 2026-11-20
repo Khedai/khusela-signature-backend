@@ -333,7 +333,8 @@ function inviteRateLimit(req,res,next){
 // pushed?" is one request with no credentials: Render puts the commit in
 // RENDER_GIT_COMMIT, and tools/check_deployed.js compares it with the local HEAD.
 // Anything without that variable — a laptop running npm start — says 'local'.
-app.get('/health',(req,res)=>res.json({ok:true,service:'khusela-digital-signature',build:process.env.RENDER_GIT_COMMIT||'local',inviteProtected:!!INVITE_KEY,emailConfigured:mailConfigured(),emailPaths:mailPaths(),emailProtected:!!process.env.EMAIL_API_KEY,recordingsConfigured:vicidialConfigured(),time:now()}));
+app.get('/health',(req,res)=>res.json({ok:true,service:'khusela-digital-signature',build:process.env.RENDER_GIT_COMMIT||'local',inviteProtected:!!INVITE_KEY,emailConfigured:mailConfigured(),emailPaths:mailPaths(),emailProtected:!!process.env.EMAIL_API_KEY,recordingsConfigured:vicidialConfigured(),
+ recordingsBase:vicidialConfigured()?(()=>{try{return new URL(/^https?:\/\//i.test(VICIDIAL_BASE_URL)?VICIDIAL_BASE_URL:'https://'+VICIDIAL_BASE_URL).host}catch(e){return 'invalid'}})():'',time:now()}));
 
 // The client's link points at /sign/<token>, but the page behind it is one static
 // file for every token: public/sign.html reads the token out of its own path.
@@ -583,7 +584,8 @@ app.get('/api/recordings',wrap(async(req,res)=>{
   const rows=await vicidialLookup(agent,date);
   res.json({ok:true,agent,date,rows});
  }catch(e){
-  console.error('Vicidial recording lookup failed: '+(e&&e.message?e.message:e));
+  console.error('Vicidial recording lookup failed: '+(e&&e.message?e.message:e)
+   +' | cause: '+((e&&e.cause&&((e.cause.code||'')+' '+(e.cause.message||''))).trim()||'none'));
   res.status(502).json({error:'Could not look up recordings on Vicidial: '+((e&&e.message?e.message:e)||'the server did not answer')});
  }
 }));
