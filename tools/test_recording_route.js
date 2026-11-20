@@ -159,7 +159,7 @@ const decodeBody = (s) => String(s).replace(/=\r?\n/g, '').replace(/=([0-9A-Fa-f
   const sentJson = await jsonBody(sent);
   check('an application with a recording is accepted', sent.ok === true, JSON.stringify(sentJson));
   check('the response says the recording was stored', sentJson && sentJson.recordingStored === true);
-  check('the response says the recording was attached', sentJson && sentJson.recordingAttached !== false);
+  check('the response says the recording was attached', sentJson && sentJson.recordingAttached === true);
   const withBody = smtp.sessions[0] ? smtp.sessions[0].data : '';
   check('the email states the recording was attached', /Call recording: attached as/.test(withBody));
   check('the MP3 itself reached the office mailbox', withBody.includes(MP3.toString('base64').slice(0, 30)));

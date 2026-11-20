@@ -515,7 +515,8 @@ app.post('/api/email',emailRateLimit,emailGate,emailUpload.fields([{name:'attach
   // the message headers carry that and this log is not the place for it.
   console.log(`Application emailed (${(file.size/1048576).toFixed(1)} MB, message ${out.messageId||'?'}, accepted by ${out.accepted.join(', ')||'nobody'}) — saved as submission ${submissionId}`);
   res.json({ok:true,messageId:out.messageId,accepted:out.accepted.length>0,submissionId,stored:true,linkOnly:!!out.linkOnly,
-   recordingStored:!!recording,recordingLinkOnly:!!recording&&!out.recordingAttached});
+   recordingStored:!!recording,recordingAttached:!!out.recordingAttached,
+   recordingLinkOnly:!!recording&&!out.recordingAttached});
  }catch(e){
   // Every delivery path refused or could not be reached. That is neither the
   // caller's mistake nor a fault in this process, so it is a 502 carrying the
