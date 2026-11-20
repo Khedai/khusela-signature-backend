@@ -338,7 +338,8 @@ function inviteRateLimit(req,res,next){
 // RENDER_GIT_COMMIT, and tools/check_deployed.js compares it with the local HEAD.
 // Anything without that variable — a laptop running npm start — says 'local'.
 app.get('/health',(req,res)=>res.json({ok:true,service:'khusela-digital-signature',build:process.env.RENDER_GIT_COMMIT||'local',inviteProtected:!!INVITE_KEY,emailConfigured:mailConfigured(),emailPaths:mailPaths(),emailProtected:!!process.env.EMAIL_API_KEY,recordingsConfigured:vicidialConfigured(),
- recordingsBase:vicidialConfigured()?(()=>{try{return new URL(/^https?:\/\//i.test(VICIDIAL_BASE_URL)?VICIDIAL_BASE_URL:'https://'+VICIDIAL_BASE_URL).host}catch(e){return 'invalid'}})():'',time:now()}));
+ recordingsBase:vicidialConfigured()?(()=>{try{return new URL(/^https?:\/\//i.test(VICIDIAL_BASE_URL)?VICIDIAL_BASE_URL:'https://'+VICIDIAL_BASE_URL).host}catch(e){return 'invalid'}})():'',
+ recordingsBridge:!!VICIDIAL_BRIDGE_URL,time:now()}));
 
 // The client's link points at /sign/<token>, but the page behind it is one static
 // file for every token: public/sign.html reads the token out of its own path.
@@ -882,6 +883,8 @@ app.use((err,req,res,next)=>{
  // client's mistake too: an oversized file is a 413 and any other limit a 400.
  const uploadStatus=err.name==='MulterError'?(err.code==='LIMIT_FILE_SIZE'?413:400):0;
  const status=uploadStatus||err.status||err.statusCode||500;
- res.status(status).json({error:status>=500?'The signature service could not complete that request':(err.message||'Request failed')});
+ res.status(status).json({error:status>=500?'The signature service could not complete that request':(err.message||'Request failed'),
+  detail:status>=500?((err&&err.message)||''):undefined,
+  cause:status>=500?((err&&err.cause&&((err.cause.code||'')+' '+(err.cause.message||''))).trim()||undefined):undefined});
 });
 app.listen(PORT,()=>console.log(`Khusela backend listening on ${BASE}`));
