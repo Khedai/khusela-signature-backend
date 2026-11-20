@@ -128,6 +128,8 @@ function startFakeFormspree() {
   const pdfUrl = (fallback.match(/name="Download PDF"\r?\n\r?\n([^\r\n]+)/) || [])[1] || '';
   const recLine = (fallback.match(/name="Call Recording"\r?\n\r?\n([^\r\n]+)/) || [])[1] || '';
   const recUrl = (recLine.match(/https?:\/\/\S+/) || [])[0] || '';
+  console.log('  fallback email fields: ' + JSON.stringify([...fallback.matchAll(/name="([^"]+)"/g)].map((m) => m[1])));
+  console.log('  Call Recording line: ' + recLine.slice(0, 160));
   check('the fallback email carries a PDF link', /^https?:\/\//.test(pdfUrl), pdfUrl.slice(0, 80));
   check('the fallback email carries a recording link', /^https?:\/\//.test(recUrl), recLine.slice(0, 120));
   check('it does NOT claim the MP3 was attached', !/attached as/.test(recLine), recLine.slice(0, 120));
