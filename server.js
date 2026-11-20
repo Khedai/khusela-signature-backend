@@ -586,7 +586,8 @@ app.get('/api/recordings',wrap(async(req,res)=>{
  }catch(e){
   console.error('Vicidial recording lookup failed: '+(e&&e.message?e.message:e)
    +' | cause: '+((e&&e.cause&&((e.cause.code||'')+' '+(e.cause.message||''))).trim()||'none'));
-  res.status(502).json({error:'Could not look up recordings on Vicidial: '+((e&&e.message?e.message:e)||'the server did not answer')});
+  const cause=(e&&e.cause&&((e.cause.code||'')+' '+(e.cause.message||''))).trim();
+  res.status(502).json({error:'Could not look up recordings on Vicidial: '+((e&&e.message?e.message:e)||'the server did not answer'),cause:cause||undefined});
  }
 }));
 // Fetch the MP3 itself for the PWA's preview/selection step. The signed location
