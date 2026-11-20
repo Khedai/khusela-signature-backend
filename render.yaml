@@ -166,3 +166,7 @@ services:
       #   sync: false
       # - key: VICIDIAL_RECORDINGS_PASS
       #   sync: false
+      # FREE bridge (use instead of a static IP when the dialer blocks Render):
+      # run tools/vicidial_bridge.js on an office PC and set the tunnel URL here.
+      # - key: VICIDIAL_BRIDGE_URL
+      #   sync: false

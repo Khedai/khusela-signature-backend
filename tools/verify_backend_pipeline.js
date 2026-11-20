@@ -47,6 +47,7 @@ const child = spawn(process.execPath, ['server.js'], {
   VICIDIAL_API_PASS: values.VICIDIAL_API_PASS || '',
   VICIDIAL_AGENT: values.VICIDIAL_AGENT || '',
   VICIDIAL_DATE: values.VICIDIAL_DATE || '',
+  VICIDIAL_BRIDGE_URL: process.env.VICIDIAL_BRIDGE_URL || '',
  }),
  stdio: ['ignore', 'pipe', 'pipe'],
 });

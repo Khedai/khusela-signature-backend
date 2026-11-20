@@ -33,6 +33,10 @@ const VICIDIAL_API_PASS=process.env.VICIDIAL_API_PASS||'';
 const VICIDIAL_RECORDINGS_PATH=process.env.VICIDIAL_RECORDINGS_PATH||'/RECORDINGS/';
 const VICIDIAL_RECORDINGS_USER=process.env.VICIDIAL_RECORDINGS_USER||'';
 const VICIDIAL_RECORDINGS_PASS=process.env.VICIDIAL_RECORDINGS_PASS||'';
+// Optional free alternative to a static Render IP: an office-side bridge that
+// CAN reach the dialer. Set this to the public tunnel URL of tools/vicidial_bridge.js.
+const VICIDIAL_BRIDGE_URL=String(process.env.VICIDIAL_BRIDGE_URL||'').replace(/\/+$/,'');
+const bridgeKey=()=>crypto.createHmac('sha256',VICIDIAL_API_PASS).update('khusela-vicidial-bridge').digest('hex');
 const vicidialConfigured=()=>!!(VICIDIAL_BASE_URL&&VICIDIAL_API_USER&&VICIDIAL_API_PASS);
 // Every request reaches this process through the host's own proxy, so the socket
 // peer is that proxy and not the client. On Render that made every signature row
@@ -557,6 +561,16 @@ function parseRecordingRows(text){
  return out;
 }
 async function vicidialLookup(agentUser,date){
+ if(VICIDIAL_BRIDGE_URL){
+  const u=new URL(VICIDIAL_BRIDGE_URL+'/lookup');
+  u.searchParams.set('agent',agentUser);
+  u.searchParams.set('date',date);
+  const res=await fetch(u,{headers:{'x-bridge-key':bridgeKey()},signal:AbortSignal.timeout(RECORDING_FETCH_TIMEOUT_MS)});
+  const text=await res.text();
+  if(!res.ok) throw new Error(`bridge answered HTTP ${res.status}: ${text.slice(0,120)}`);
+  if(/^ERROR:/i.test(text.trim())) throw new Error(text.trim().replace(/\|.*$/,''));
+  return parseRecordingRows(text);
+ }
  const raw=VICIDIAL_BASE_URL.startsWith('http')?VICIDIAL_BASE_URL:`https://${VICIDIAL_BASE_URL}`;
  const u=new URL(raw.replace(/\/+$/,'')+VICIDIAL_API_PATH);
  u.searchParams.set('source','khusela-itc');
@@ -599,8 +613,14 @@ app.get('/api/recordings/audio',wrap(async(req,res)=>{
  try{ target=new URL(location); }catch(e){ return res.status(400).json({error:'Invalid recording location'}); }
  const headers={};
  if(VICIDIAL_RECORDINGS_USER) headers.Authorization='Basic '+Buffer.from(`${VICIDIAL_RECORDINGS_USER}:${VICIDIAL_RECORDINGS_PASS}`).toString('base64');
+ let fetchUrl=target;
+ if(VICIDIAL_BRIDGE_URL){
+  fetchUrl=new URL(VICIDIAL_BRIDGE_URL+'/audio');
+  fetchUrl.searchParams.set('location',location);
+  headers['x-bridge-key']=bridgeKey();
+ }
  try{
-  const upstream=await fetch(target,{headers,signal:AbortSignal.timeout(RECORDING_FETCH_TIMEOUT_MS)});
+  const upstream=await fetch(fetchUrl,{headers,signal:AbortSignal.timeout(RECORDING_FETCH_TIMEOUT_MS)});
   if(!upstream.ok) return res.status(502).json({error:`Vicidial did not provide the recording (HTTP ${upstream.status})`});
   // Vicidial serves MP3s as application/forcedownload, which makes a browser
   // save the preview instead of playing it. Force an audio type from the
