@@ -231,9 +231,13 @@ function recordingLinkAllowed(location,expires,signature){
  if(!SUBMISSION_LINK_SECRET) return false;
  const exp=Number(expires);
  if(!Number.isFinite(exp)||exp<Date.now()) return false;
- let target,base;
- try{ target=new URL(String(location)); base=new URL(VICIDIAL_BASE_URL); }catch(e){ return false; }
- if(target.origin!==base.origin) return false;
+ let target;
+ try{ target=new URL(String(location)); }catch(e){ return false; }
+ // Vicidial returns recording URLs on the dialer's own host/IP, which is often
+ // NOT the admin domain in VICIDIAL_BASE_URL. The HMAC above is the real gate:
+ // only a location returned by recording_lookup can ever be signed. Keep the
+ // shape check (http(s), recordings path, audio extension) as defence in depth.
+ if(!/^https?:$/i.test(target.protocol)) return false;
  if(target.pathname.toUpperCase().indexOf(VICIDIAL_RECORDINGS_PATH.toUpperCase())!==0) return false;
  if(!/\.(mp3|wav)$/i.test(target.pathname)) return false;
  const expected=Buffer.from(recordingLinkSignature(String(location),exp));
@@ -594,7 +598,10 @@ app.get('/api/recordings/audio',wrap(async(req,res)=>{
  try{
   const upstream=await fetch(target,{headers,signal:AbortSignal.timeout(RECORDING_FETCH_TIMEOUT_MS)});
   if(!upstream.ok) return res.status(502).json({error:`Vicidial did not provide the recording (HTTP ${upstream.status})`});
-  const type=upstream.headers.get('content-type')||(/\.wav$/i.test(target.pathname)?'audio/wav':'audio/mpeg');
+  // Vicidial serves MP3s as application/forcedownload, which makes a browser
+  // save the preview instead of playing it. Force an audio type from the
+  // extension so the consultant can listen before choosing the file.
+  const type=/\.wav$/i.test(target.pathname)?'audio/wav':'audio/mpeg';
   res.setHeader('Content-Type',type);
   res.setHeader('Content-Disposition','inline');
   res.setHeader('Cache-Control','no-store');

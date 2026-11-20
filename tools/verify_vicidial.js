@@ -121,6 +121,52 @@ async function call(params) {
   });
   console.log('');
   console.log('The URL each row carries is what the backend will fetch for the MP3.');
+
+  // Fetch a small slice of the first recording. This proves the file is actually
+  // reachable (and whether /RECORDINGS/ needs a password) without downloading
+  // the whole call. Only sanitized headers/bytes are printed.
+  const first = rows[0].split('|');
+  const location = first.slice(5).join('|').trim();
+  if (/^https?:\/\//i.test(location)) {
+   try {
+    const fileUrl = new URL(location);
+    const fileTransport = fileUrl.protocol === 'http:' ? http : https;
+    const probe = await new Promise((resolve, reject) => {
+     const req = fileTransport.get(fileUrl, { headers: { Range: 'bytes=0-1023' } }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => { if (chunks.length < 64) chunks.push(c); });
+      res.on('end', () => resolve({
+       status: res.statusCode || 0,
+       type: res.headers['content-type'] || '',
+       length: res.headers['content-length'] || '',
+       first: Buffer.concat(chunks).subarray(0, 12).toString('hex'),
+      }));
+     });
+     req.setTimeout(20000, () => req.destroy(new Error('no answer within 20 s')));
+     req.on('error', reject);
+    });
+    console.log('');
+    console.log('RECORDING DOWNLOAD: HTTP ' + probe.status);
+    console.log('  host: ' + fileUrl.host + '   path: ' + fileUrl.pathname);
+    console.log('  content-type: ' + (probe.type || '(none)') + '   content-length: ' + (probe.length || '(none)'));
+    console.log('  first bytes: ' + (probe.first || '(empty)'));
+    if (probe.status === 401 || probe.status === 403) {
+     console.log('  -> /RECORDINGS/ needs a password; set VICIDIAL_RECORDINGS_USER/PASS.');
+     ok = false;
+    } else if (probe.status >= 200 && probe.status < 300) {
+     console.log('  -> the MP3 can be downloaded from this machine.');
+    } else {
+     console.log('  -> unexpected status; the backend may not be able to fetch this file.');
+     ok = false;
+    }
+   } catch (e) {
+    console.log('');
+    console.log('RECORDING DOWNLOAD: FAILED — ' + (e && e.message ? e.message : e));
+    console.log('  The lookup URL may point at an internal address. The backend would');
+    console.log('  need the same network access (or the office-machine go-between).');
+    ok = false;
+   }
+  }
  }
  console.log('');
  console.log(ok ? 'RESULT: this login can be used for the pilot.' : 'RESULT: fix the permissions above and run again.');
