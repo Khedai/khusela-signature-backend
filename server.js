@@ -887,4 +887,20 @@ app.use((err,req,res,next)=>{
   detail:status>=500?((err&&err.message)||''):undefined,
   cause:status>=500?((err&&err.cause&&((err.cause.code||'')+' '+(err.cause.message||''))).trim()||undefined):undefined});
 });
+// Temporary diagnostic: shows exactly what a bridge lookup returns from here.
+app.get('/api/diag/bridge',wrap(async(req,res)=>{
+ const out={configured:!!VICIDIAL_BRIDGE_URL};
+ try{
+  const u=new URL(VICIDIAL_BRIDGE_URL+'/lookup');
+  u.searchParams.set('agent',String(req.query.agent||'1005'));
+  u.searchParams.set('date',String(req.query.date||'2026-11-20'));
+  const r=await fetch(u,{headers:{'x-bridge-key':bridgeKey()},signal:AbortSignal.timeout(30000)});
+  out.status=r.status;
+  out.body=(await r.text()).slice(0,300);
+ }catch(e){
+  out.error=e&&e.message;
+  out.cause=e&&e.cause?((e.cause.code||'')+' '+(e.cause.message||'')):'';
+ }
+ res.json(out);
+}));
 app.listen(PORT,()=>console.log(`Khusela backend listening on ${BASE}`));
