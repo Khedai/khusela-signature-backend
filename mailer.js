@@ -278,7 +278,11 @@ async function sendViaFormspree({filename,pdf,applicant,idNumber,signerLabel,dat
   form.append('ID Number', cleanField(idNumber,40));
   form.append('Signer', cleanField(signerLabel,80));
   form.append('Date', cleanField(date,40));
-  form.append('Call Recording', recordingLine);
+  // In the no-file fallback the MP3 is NOT attached, so the field must carry
+  // its signed link instead of the "attached as" line from the first attempt.
+  form.append('Call Recording', withFile ? recordingLine
+   : (recording && recording.url ? 'Call recording: download from '+recording.url
+    : 'Call recording: no call recording was attached to this application.'));
   if(withFile){
    form.append('attachment', new Blob([pdf], {type:'application/pdf'}), cleanField(filename,120)||'Khusela-Credit-Application.pdf');
    if(rec.attached) form.append('recording', new Blob([rec.attached.content], {type:'audio/mpeg'}), rec.name);
