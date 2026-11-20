@@ -9,6 +9,8 @@
 //
 // Copy .env.verify.example to .env.verify, fill in your values, then run it.
 import fs from 'fs';
+import http from 'http';
+import https from 'https';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -51,8 +53,19 @@ async function call(params) {
  u.searchParams.set('user', USER);
  u.searchParams.set('pass', PASS);
  Object.entries(params).forEach(([k, v]) => u.searchParams.set(k, v));
- const res = await fetch(u, { signal: AbortSignal.timeout(20000) });
- return { status: res.status, text: await res.text() };
+ // Node's fetch/undici can leave a closing handle behind on Windows and print
+ // an assertion after an otherwise successful check. Plain https.get keeps the
+ // result identical and lets the process exit cleanly.
+ const transport = u.protocol === 'http:' ? http : https;
+ return await new Promise((resolve, reject) => {
+  const req = transport.get(u, (res) => {
+   const chunks = [];
+   res.on('data', (c) => chunks.push(c));
+   res.on('end', () => resolve({ status: res.statusCode || 0, text: Buffer.concat(chunks).toString('utf8') }));
+  });
+  req.setTimeout(20000, () => req.destroy(new Error('Vicidial did not answer within 20 s')));
+  req.on('error', reject);
+ });
 }
 
 (async () => {
