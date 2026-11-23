@@ -601,8 +601,7 @@ app.get('/api/recordings',wrap(async(req,res)=>{
  }catch(e){
   console.error('Vicidial recording lookup failed: '+(e&&e.message?e.message:e)
    +' | cause: '+((e&&e.cause&&((e.cause.code||'')+' '+(e.cause.message||''))).trim()||'none'));
-  const cause=(e&&e.cause&&((e.cause.code||'')+' '+(e.cause.message||''))).trim();
-  res.status(502).json({error:'Could not look up recordings on Vicidial: '+((e&&e.message?e.message:e)||'the server did not answer'),cause:cause||undefined});
+   res.status(502).json({error:'Could not look up recordings on Vicidial: '+((e&&e.message?e.message:e)||'the server did not answer')});
  }
 }));
 // Fetch the MP3 itself for the PWA's preview/selection step. The signed location
@@ -883,24 +882,7 @@ app.use((err,req,res,next)=>{
  // client's mistake too: an oversized file is a 413 and any other limit a 400.
  const uploadStatus=err.name==='MulterError'?(err.code==='LIMIT_FILE_SIZE'?413:400):0;
  const status=uploadStatus||err.status||err.statusCode||500;
- res.status(status).json({error:status>=500?'The signature service could not complete that request':(err.message||'Request failed'),
-  detail:status>=500?((err&&err.message)||''):undefined,
-  cause:status>=500?((err&&err.cause&&((err.cause.code||'')+' '+(err.cause.message||''))).trim()||undefined):undefined});
+ res.status(status).json({error:status>=500?'The signature service could not complete that request':(err.message||'Request failed')});
 });
-// Temporary diagnostic: shows exactly what a bridge lookup returns from here.
-app.get('/api/diag/bridge',wrap(async(req,res)=>{
- const out={configured:!!VICIDIAL_BRIDGE_URL};
- try{
-  const u=new URL(VICIDIAL_BRIDGE_URL+'/lookup');
-  u.searchParams.set('agent',String(req.query.agent||'1005'));
-  u.searchParams.set('date',String(req.query.date||'2026-11-20'));
-  const r=await fetch(u,{headers:{'x-bridge-key':bridgeKey()},signal:AbortSignal.timeout(30000)});
-  out.status=r.status;
-  out.body=(await r.text()).slice(0,300);
- }catch(e){
-  out.error=e&&e.message;
-  out.cause=e&&e.cause?((e.cause.code||'')+' '+(e.cause.message||'')):'';
- }
- res.json(out);
-}));
+
 app.listen(PORT,()=>console.log(`Khusela backend listening on ${BASE}`));
