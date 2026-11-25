@@ -569,7 +569,12 @@ async function vicidialLookup(agentUser,date){
   const res=await fetch(u,{headers:{'x-bridge-key':bridgeKey()},signal:AbortSignal.timeout(RECORDING_FETCH_TIMEOUT_MS)});
   const text=await res.text();
   if(!res.ok) throw new Error(`bridge answered HTTP ${res.status}: ${text.slice(0,120)}`);
-  if(/^ERROR:/i.test(text.trim())) throw new Error(text.trim().replace(/\|.*$/,''));
+  if(/^ERROR:/i.test(text.trim())){
+   // Vicidial reports "no calls on that day" as an ERROR line. That is a normal
+   // empty result, not a failure: the consultant simply has nothing to attach.
+   if(/NO RECORDINGS FOUND/i.test(text)) return [];
+   throw new Error(text.trim().replace(/\|.*$/,''));
+  }
   return parseRecordingRows(text);
  }
  const raw=VICIDIAL_BASE_URL.startsWith('http')?VICIDIAL_BASE_URL:`https://${VICIDIAL_BASE_URL}`;
@@ -586,7 +591,10 @@ async function vicidialLookup(agentUser,date){
  const res=await fetch(u,{signal:AbortSignal.timeout(RECORDING_FETCH_TIMEOUT_MS)});
  const text=await res.text();
  if(!res.ok) throw new Error(`Vicidial answered HTTP ${res.status}`);
- if(/^ERROR:/i.test(text.trim())) throw new Error(text.trim().replace(/\|.*$/,''));
+ if(/^ERROR:/i.test(text.trim())){
+  if(/NO RECORDINGS FOUND/i.test(text)) return [];
+  throw new Error(text.trim().replace(/\|.*$/,''));
+ }
  return parseRecordingRows(text);
 }
 app.get('/api/recordings',wrap(async(req,res)=>{
@@ -599,9 +607,10 @@ app.get('/api/recordings',wrap(async(req,res)=>{
   const rows=await vicidialLookup(agent,date);
   res.json({ok:true,agent,date,rows});
  }catch(e){
-  console.error('Vicidial recording lookup failed: '+(e&&e.message?e.message:e)
-   +' | cause: '+((e&&e.cause&&((e.cause.code||'')+' '+(e.cause.message||''))).trim()||'none'));
-   res.status(502).json({error:'Could not look up recordings on Vicidial: '+((e&&e.message?e.message:e)||'the server did not answer')});
+  // Keep the log line simple: reaching into e.cause used to throw a TypeError
+  // when the error had no cause, which turned this 502 into a bare 500.
+  console.error('Vicidial recording lookup failed: '+((e&&e.message)||String(e||'unknown error')));
+  res.status(502).json({error:'Could not look up recordings on Vicidial: '+((e&&e.message?e.message:e)||'the server did not answer')});
  }
 }));
 // Fetch the MP3 itself for the PWA's preview/selection step. The signed location

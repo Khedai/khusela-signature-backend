@@ -71,6 +71,16 @@ function startFakeVicidial() {
   seen.push(u.pathname);
   if (u.pathname === '/vicidial/non_agent_api.php') {
    check('the API call asks for recording_lookup', u.searchParams.get('function') === 'recording_lookup');
+   // Vicidial answers "no calls that day" with an ERROR line, and a real fault
+   // with a different ERROR line. The route has to tell those apart.
+   if (u.searchParams.get('agent_user') === '1002') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    return res.end('ERROR: recording_lookup NO RECORDINGS FOUND - apiuser|1002||2026-11-18|\n');
+   }
+   if (u.searchParams.get('agent_user') === '1003') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    return res.end('ERROR: recording_lookup INVALID USER - apiuser|1003||2026-11-18|\n');
+   }
    check('the API call names the consultant and date',
     u.searchParams.get('agent_user') === '1001' && u.searchParams.get('date') === '2026-11-18');
    res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -140,6 +150,20 @@ const decodeBody = (s) => String(s).replace(/=\r?\n/g, '').replace(/=([0-9A-Fa-f
   check('the lookup returns the consultant\'s recording', lookup.ok && (data.rows || []).length === 1, JSON.stringify(data));
   const row = (data.rows || [])[0] || {};
   check('the row names the recording file', /20261118_101112_1001-all\.mp3$/.test(row.filename || ''), row.filename);
+
+  // A consultant with no calls that day must get an empty list, not an error:
+  // "nothing to attach" is a normal outcome, and the PWA says so plainly.
+  const empty = await fetch(srv.base + '/api/recordings?agent=1002&date=2026-11-18', { headers: ORIGIN });
+  const emptyBody = await jsonBody(empty);
+  check('a day with no calls comes back as an empty list',
+   empty.ok && Array.isArray(emptyBody.rows) && emptyBody.rows.length === 0, JSON.stringify(emptyBody));
+
+  // A genuine Vicidial fault must stay a 502 with a readable reason — an earlier
+  // log line threw while reading e.cause and turned this into a bare 500.
+  const broken = await fetch(srv.base + '/api/recordings?agent=1003&date=2026-11-18', { headers: ORIGIN });
+  const brokenBody = await jsonBody(broken);
+  check('a real Vicidial error is reported as a 502 with the reason',
+   broken.status === 502 && /INVALID USER/.test((brokenBody && brokenBody.error) || ''), broken.status + ' ' + JSON.stringify(brokenBody));
 
   const audio = await fetch(row.audioUrl);
   const bytes = Buffer.from(await audio.arrayBuffer());
